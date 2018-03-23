@@ -215,10 +215,12 @@ tf_cuda_library(
     srcs = [
         "convert/convert_graph.cc",
         "convert/convert_nodes.cc",
+        "convert/trt_optimization_pass.cc",
     ],
     hdrs = [
         "convert/convert_graph.h",
         "convert/convert_nodes.h",
+        "convert/trt_optimization_pass.h",
     ],
     deps = [
         ":segment",
@@ -226,10 +228,12 @@ tf_cuda_library(
         ":trt_resources",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler:utils",
+        "//tensorflow/core/grappler/optimizers:meta_optimizer",
         "//tensorflow/core:framework",
         "//tensorflow/core:framework_lite",
         "//tensorflow/core:graph",
         "//tensorflow/core:lib",
+        "//tensorflow/core:core_cpu_headers_lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/grappler:devices",

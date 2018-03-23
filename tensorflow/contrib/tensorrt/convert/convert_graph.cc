@@ -33,6 +33,7 @@ limitations under the License.
 #include "tensorflow/core/grappler/grappler_item.h"
 #include "tensorflow/core/grappler/optimizers/constant_folding.h"
 #include "tensorflow/core/grappler/optimizers/layout_optimizer.h"
+#include "tensorflow/core/grappler/optimizers/meta_optimizer.h"
 #include "tensorflow/core/grappler/utils.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
@@ -347,17 +348,18 @@ tensorflow::Status ConvertGraphDefToTensorRT(
   int num_gpus = tensorflow::grappler::GetNumAvailableGPUs();
   VLOG(2) << "cpu_cores: " << num_cpu_cores;
   VLOG(2) << "gpus: " << num_gpus;
-
-  TF_RETURN_IF_ERROR(optimizer.Optimize(cluster, item, &gdef));
-
+  tensorflow::RewriterConfig rw_cfg;
+  tensorflow::grappler::MetaOptimizer meta_opt(nullptr, rw_cfg);
+  // TF_RETURN_IF_ERROR(optimizer.Optimize(cluster, item, &gdef));
+  TF_RETURN_IF_ERROR(meta_opt.Optimize(cluster, item, &gdef));
   // constant folding
   item.graph = gdef;
-  tensorflow::grappler::ConstantFolding fold(nullptr);
-  TF_RETURN_IF_ERROR(fold.Optimize(nullptr, item, &gdef));
+  // tensorflow::grappler::ConstantFolding fold(nullptr);
+  // TF_RETURN_IF_ERROR(fold.Optimize(nullptr, item, &gdef));
 
   // AJ refactoring shape inference through grappler/GraphProperties.
   tensorflow::grappler::GraphProperties static_graph_properties(item);
-  TF_RETURN_IF_ERROR(static_graph_properties.InferStatically(false));
+  TF_RETURN_IF_ERROR(static_graph_properties.InferStatically(true));
   // Build full graph
   tensorflow::FunctionLibraryDefinition flib(tensorflow::OpRegistry::Global(),
                                              gdef.library());

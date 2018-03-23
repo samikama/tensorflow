@@ -4,6 +4,7 @@ load("//tensorflow:tensorflow.bzl", "tf_cc_test")
 load("//tensorflow:tensorflow.bzl", "tf_cuda_cc_test")
 load("//tensorflow:tensorflow.bzl", "tf_kernel_library")
 load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
+load("//tensorflow:tensorflow.bzl", "cc_header_only_library")
 
 # Platform specific build config
 load(
@@ -416,10 +417,11 @@ cc_library(
         "//tensorflow/core/grappler/costs:graph_properties",
         "//tensorflow/core/grappler/utils:topological_sort",
         "//tensorflow/core/grappler/utils:traversal",
-    ] + if_cuda([
-        ":gpu_swapping_kernels",
-        ":gpu_swapping_ops",
-    ]),
+    ]
+    # ] + if_cuda([
+    #     ":gpu_swapping_kernels",
+    #     ":gpu_swapping_ops",
+    # ]),
 )
 
 tf_cuda_cc_test(
