@@ -23,7 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "tensorflow/core/framework/graph.pb.h"
-#include "tensorflow/core/grappler/optimizers/graph_optimizer.h"
+#include "tensorflow/core/grappler/optimizers/custom_graph_optimizer.h"
 #include "tensorflow/core/platform/logging.h"
 
 #if GOOGLE_CUDA
@@ -32,11 +32,16 @@ limitations under the License.
 namespace tensorflow {
 namespace tensorrt {
 namespace convert {
-    class TRTOptimizationPass:public tensorflow::grappler::GraphOptimizer{
+    class TRTOptimizationPass:public tensorflow::grappler::CustomGraphOptimizer{
         public:
-        TRTOptimizationPass(string optName):m_name_(optName){};
+        TRTOptimizationPass(string optName="TRTOptimizationPass"):m_name_(optName){
+          VLOG(0)<<"Constructing "<<m_name_;
+        };
         //tensorflow::Status Run(const tensorflow::GraphOptimizationPassOptions &options) override;
         string name() const override {return m_name_;};
+        tensorflow::Status Init() override {
+          VLOG(0)<<"Called INIT"<<m_name_;
+          return tensorflow::Status::OK();};
         tensorflow::Status Optimize(tensorflow::grappler::Cluster* cluster, const tensorflow::grappler::GrapplerItem& item,
         GraphDef* optimized_graph) override;
         void Feedback(tensorflow::grappler::Cluster* cluster, const tensorflow::grappler::GrapplerItem& item,
