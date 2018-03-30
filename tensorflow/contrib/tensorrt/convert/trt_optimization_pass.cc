@@ -1,5 +1,5 @@
 /* Copyright 2018 The TensorFlow Authors. All Rights Reserved.
-
+1;4804;0c
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -214,8 +214,17 @@ void TRTOptimizationPass::Feedback(
 // }
 using tensorflow::grappler::CustomGraphOptimizerRegistrar;
 namespace {
-static CustomGraphOptimizerRegistrar TRTOptimizationPass_Registrar([]() {
-  VLOG(0)<<"Called registration function";
+
+class samiReg : public CustomGraphOptimizerRegistrar{
+ public:
+  samiReg(const tensorflow::grappler::CustomGraphOptimizerRegistry::Creator& cr,
+          const string& name):CustomGraphOptimizerRegistrar(cr,name){
+    VLOG(1)<<"Constructing CustomOptimizationPass registration object for"<<name;
+  }
+};
+//static CustomGraphOptimizerRegistrar TRTOptimizationPass_Registrar([]() {
+static samiReg TRTOptimizationPass_Registrar([]() {
+  VLOG(1)<<"Instantiating CustomOptimizationPass object TensorRTOptimizer";
   return new tensorflow::tensorrt::convert::TRTOptimizationPass("TensorRTOptimizer");},"TensorRTOptimizer");
 }
 
