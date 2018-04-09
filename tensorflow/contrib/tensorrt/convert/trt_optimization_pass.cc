@@ -219,13 +219,13 @@ class samiReg : public CustomGraphOptimizerRegistrar{
  public:
   samiReg(const tensorflow::grappler::CustomGraphOptimizerRegistry::Creator& cr,
           const string& name):CustomGraphOptimizerRegistrar(cr,name){
-    VLOG(1)<<"Constructing CustomOptimizationPass registration object for"<<name;
+    VLOG(0)<<"Constructing a CustomOptimizationPass registration object for "<<name;
   }
 };
 //static CustomGraphOptimizerRegistrar TRTOptimizationPass_Registrar([]() {
-static samiReg TRTOptimizationPass_Registrar([]() {
-  VLOG(1)<<"Instantiating CustomOptimizationPass object TensorRTOptimizer";
-  return new tensorflow::tensorrt::convert::TRTOptimizationPass("TensorRTOptimizer");},"TensorRTOptimizer");
+static samiReg TRTOptimizationPass_Registrar(
+  []() {VLOG(0)<<"Instantiating CustomOptimizationPass object TensorRTOptimizer";
+  return new tensorflow::tensorrt::convert::TRTOptimizationPass("TensorRTOptimizer");},("TensorRTOptimizer"));
 }
 
 }  // namespace convert
