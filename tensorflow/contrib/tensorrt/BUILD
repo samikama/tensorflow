@@ -218,10 +218,12 @@ tf_cuda_library(
     srcs = [
         "convert/convert_graph.cc",
         "convert/convert_nodes.cc",
+        "convert/trt_optimization_pass.cc",
     ],
     hdrs = [
         "convert/convert_graph.h",
         "convert/convert_nodes.h",
+        "convert/trt_optimization_pass.h",
     ],
     deps = [
         ":segment",
@@ -238,8 +240,7 @@ tf_cuda_library(
         "//tensorflow/core/grappler:devices",
         "//tensorflow/core/grappler/clusters:virtual_cluster",
         "//tensorflow/core/grappler/costs:graph_properties",
-        "//tensorflow/core/grappler/optimizers:constant_folding",
-        "//tensorflow/core/grappler/optimizers:layout_optimizer",
+        "//tensorflow/core/grappler/optimizers:meta_optimizer",
     ] + if_tensorrt([
         "@local_config_tensorrt//:nv_infer",
     ]) + tf_custom_op_library_additional_deps(),
