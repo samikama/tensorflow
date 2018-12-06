@@ -20,6 +20,7 @@ limitations under the License.
 #include <memory>
 #include <string>
 #include <vector>
+#include <set>
 
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
@@ -53,9 +54,15 @@ class BackendOptions {
   BackendOptions& set_intra_op_parallelism_threads(int num_threads);
   int intra_op_parallelism_threads() const;
 
+  // Sets the allowed_devices set for creation of stream executors.
+  BackendOptions& set_allowed_devices(const std::set<int> device_set);
+
+  std::set<int> get_allowed_devices() const;
+
  private:
   se::Platform* platform_ = nullptr;
   int intra_op_parallelism_threads_ = -1;
+  std::set<int> allowed_devices_ = {-1};
 };
 
 // Class which encapsulates an XLA backend. It includes everything necessary

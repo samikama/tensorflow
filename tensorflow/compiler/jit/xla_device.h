@@ -165,6 +165,11 @@ class XlaDevice : public LocalDevice {
 
   bool RequiresSyncOnCompletion() const override LOCKS_EXCLUDED(mu_);
 
+  // Returns a set containing the device ids contained in visible_device_list or
+  // -1 if the string is empty.
+  static xla::StatusOr<std::set<int>> ParseVisibleDeviceList(
+      const string& visible_device_list);
+
   // A simple RAII handle. On construction the device's
   // outstanding_asynchronous_operations_ field is incremented; on destruction
   // it is decremented.
@@ -256,6 +261,9 @@ class XlaDevice : public LocalDevice {
   // completion.
   int64 outstanding_asynchronous_operations_ GUARDED_BY(mu_) = 0;
   condition_variable outstanding_asynchronous_operations_cv_;
+
+  // Set of allowed gpu devices at the time of construction.
+  std::set<int> allowed_devices_ = {-1};
 };
 
 // Builds OpKernel registrations on 'device' for the JIT operators

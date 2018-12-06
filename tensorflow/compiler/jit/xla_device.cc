@@ -19,6 +19,7 @@ limitations under the License.
 #include <unordered_set>
 
 #include "absl/memory/memory.h"
+#include "absl/strings/str_split.h"
 #include "tensorflow/compiler/jit/defs.h"
 #include "tensorflow/compiler/jit/xla_compile_on_demand_op.h"
 #include "tensorflow/compiler/jit/xla_device_context.h"
@@ -213,6 +214,10 @@ XlaDevice::XlaDevice(const SessionOptions& session_options,
   // XlaDevice::Options.
   static constexpr int kNumDeviceToDeviceStreams = 4;
   device_to_device_streams_.resize(kNumDeviceToDeviceStreams);
+  allowed_devices_ =
+      ParseVisibleDeviceList(
+          session_options.config.gpu_options().visible_device_list())
+          .ValueOrDie();
 }
 
 XlaDevice::~XlaDevice() {
@@ -234,7 +239,8 @@ xla::LocalClient* XlaDevice::client() const {
 
   // TODO(b/78468222): This can fail, at least when the backend is GPU and
   // there is no GPU on the host.
-  return xla::ClientLibrary::GetOrCreateLocalClient(platform_).ValueOrDie();
+  return xla::ClientLibrary::GetOrCreateLocalClient(platform_, allowed_devices_)
+      .ValueOrDie();
 }
 
 Allocator* XlaDevice::GetAllocator(AllocatorAttributes attr) {
@@ -477,6 +483,27 @@ bool XlaDevice::RequiresSyncOnCompletion() const {
   mutex_lock lock(mu_);
   return sync_on_completion_;
 }
+
+/*static*/ xla::StatusOr<std::set<int>>
+  XlaDevice::ParseVisibleDeviceList(const string& visible_device_list){
+    std::set<int> gpu_ids;
+    if(visible_device_list.length()==0){
+      gpu_ids.insert(-1);
+      return gpu_ids;
+    }
+    const std::vector<string> visible_devices =
+        absl::StrSplit(visible_device_list, ',');
+    for (const string& platform_gpu_id_str : visible_devices) {
+      int32 platform_gpu_id;
+      if (!absl::SimpleAtoi(platform_gpu_id_str, &platform_gpu_id)) {
+        return errors::InvalidArgument(
+            "Could not parse entry in 'visible_device_list': '",
+            platform_gpu_id_str, "'. visible_device_list = ", visible_device_list);
+      }
+      gpu_ids.insert(platform_gpu_id);
+    }
+  return gpu_ids;
+  }
 
 XlaDevice::AsynchronousOperationHandle::AsynchronousOperationHandle(
     XlaDevice* device)

@@ -19,7 +19,6 @@ limitations under the License.
 #include <set>
 #include "absl/memory/memory.h"
 #include "absl/strings/numbers.h"
-#include "absl/strings/str_split.h"
 #include "tensorflow/compiler/jit/kernels/xla_ops.h"
 #include "tensorflow/compiler/jit/xla_device.h"
 #include "tensorflow/compiler/jit/xla_device_ops.h"
@@ -64,24 +63,7 @@ Status XlaGpuDeviceFactory::CreateDevices(
       gpu_ids.insert(i);
     }
   } else {
-    // For loop below is copied from gpu/gpu_device.cc. It validates
-    // the visible_device_list and populates gpu_ids set.
-    const std::vector<string> visible_devices =
-        absl::StrSplit(allowed_gpus, ',');
-    for (const string& platform_gpu_id_str : visible_devices) {
-      int32 platform_gpu_id;
-      if (!absl::SimpleAtoi(platform_gpu_id_str, &platform_gpu_id)) {
-        return errors::InvalidArgument(
-            "Could not parse entry in 'visible_device_list': '",
-            platform_gpu_id_str, "'. visible_device_list = ", allowed_gpus);
-      }
-      if (platform_gpu_id < 0 || platform_gpu_id >= num_visible_devices) {
-        return errors::InvalidArgument(
-            "'visible_device_list' listed an invalid GPU id '", platform_gpu_id,
-            "' but visible device count is ", num_visible_devices);
-      }
-      gpu_ids.insert(platform_gpu_id);
-    }
+    gpu_ids = XlaDevice::ParseVisibleDeviceList(allowed_gpus).ValueOrDie();
   }
   for (int i : gpu_ids) {
     XlaDevice::Options options;
