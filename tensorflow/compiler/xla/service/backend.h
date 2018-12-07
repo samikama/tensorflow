@@ -113,6 +113,12 @@ class Backend {
   // can be > 1).
   se::StreamExecutor* default_stream_executor() const {
     CHECK(!stream_executors_.empty());
+
+    for(se::StreamExecutor* e :stream_executors_){
+      if(e){
+        return e;
+      }
+    }
     return stream_executors_[0];
   }
 
