@@ -2647,6 +2647,7 @@ cc_library(
         ":encode_png_op",
         ":extract_jpeg_shape_op",
         ":non_max_suppression_op",
+        ":roi_align_op",
         ":random_crop_op",
         ":resize_area_op",
         ":resize_bicubic_op",
@@ -2664,6 +2665,8 @@ IMAGE_DEPS = [
     "//third_party/eigen3",
     "//tensorflow/core:framework",
     "//tensorflow/core:gif_internal",
+    "//tensorflow/core:image_ops_op_lib",
+    "//tensorflow/core:roi_align_op_op_lib",
     "//tensorflow/core:jpeg_internal",
     "//tensorflow/core:lib",
     "//tensorflow/core:lib_internal",
@@ -2754,6 +2757,12 @@ tf_kernel_library(
     name = "non_max_suppression_op",
     prefix = "non_max_suppression_op",
     deps = IMAGE_DEPS,
+)
+
+tf_kernel_library(
+    name = "roi_align_op",
+    prefix = "roi_align_op",
+    deps = IMAGE_DEPS + if_cuda(["@cub_archive//:cub"])
 )
 
 tf_kernel_library(
