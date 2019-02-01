@@ -26,6 +26,7 @@ from __future__ import print_function
 # go/tf-wildcard-import
 # pylint: disable=wildcard-import
 from tensorflow.python.ops.gen_image_ops import *
+from tensorflow.python.ops.gen_roi_align_op import *
 from tensorflow.python.ops.image_ops_impl import *
 # pylint: enable=wildcard-import
 

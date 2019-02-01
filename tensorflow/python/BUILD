@@ -1807,6 +1807,11 @@ tf_gen_op_wrapper_private_py(
 )
 
 tf_gen_op_wrapper_private_py(
+    name = "roi_align_op_gen",
+    visibility = ["//tensorflow:__subpackages__"],
+)
+
+tf_gen_op_wrapper_private_py(
     name = "io_ops_gen",
     visibility = [
         "//learning/brain/python/ops:__pkg__",
@@ -1885,6 +1890,7 @@ tf_gen_op_wrapper_private_py(
     name = "random_ops_gen",
     visibility = ["//learning/brain/python/ops:__pkg__"],
 )
+
 
 tf_gen_op_wrapper_private_py(
     name = "stateful_random_ops_gen",
@@ -2482,6 +2488,7 @@ py_library(
         ":nn",
         ":nn_ops_gen",
         ":random_ops",
+        ":roi_align_op_gen",
         ":string_ops",
         ":util",
         ":variables",
