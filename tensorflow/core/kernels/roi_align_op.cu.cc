@@ -15,10 +15,13 @@ limitations under the License.
 #if GOOGLE_CUDA
 
 #define EIGEN_USE_GPU
+// clean these
+#include "tensorflow/core/framework/numeric_types.h"
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/kernels/roi_align_op.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/cuda_kernel_helper.h"
+#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 
 namespace tensorflow {
 
@@ -275,14 +278,14 @@ __global__ void RoIAlignBackwardFeature(
         T g4 = top_diff_this_bin * w4 / count;
 
         if (x_low >= 0 && x_high >= 0 && y_low >= 0 && y_high >= 0) {
-          gpu_atomic_add(static_cast<T>(g1),
-                         offset_bottom_diff + y_low * width + x_low);
-          gpu_atomic_add(static_cast<T>(g2),
-                         offset_bottom_diff + y_low * width + x_high);
-          gpu_atomic_add(static_cast<T>(g3),
-                         offset_bottom_diff + y_high * width + x_low);
-          gpu_atomic_add(static_cast<T>(g4),
-                         offset_bottom_diff + y_high * width + x_high);
+          CudaAtomicAdd(offset_bottom_diff + y_low * width + x_low,
+                        static_cast<T>(g1));
+          CudaAtomicAdd(offset_bottom_diff + y_low * width + x_high,
+                        static_cast<T>(g2));
+          CudaAtomicAdd(offset_bottom_diff + y_high * width + x_low,
+                        static_cast<T>(g3));
+          CudaAtomicAdd(offset_bottom_diff + y_high * width + x_high,
+                        static_cast<T>(g4));
         }  // if
       }    // ix
     }      // iy
@@ -317,8 +320,7 @@ struct ROIAlign<GPUDevice, T> {
 
 template <typename T>
 struct ROIAlignGrad<GPUDevice, T> {
-  void operator()(const GPUDevice& d,
-                  typename TTypes<T, 4>::ConstTensor grads,
+  void operator()(const GPUDevice& d, typename TTypes<T, 4>::ConstTensor grads,
                   typename TTypes<T, 4>::ConstTensor inputs,
                   typename TTypes<T, 2>::ConstTensor rois,
                   const int pooled_height, const int pooled_width,
@@ -328,8 +330,7 @@ struct ROIAlignGrad<GPUDevice, T> {
     const int height = inputs.dimension(2);
     const int width = inputs.dimension(3);
     const int num_rois = rois.dimension(0);
-    output.device(d) = 0;
-    const int total_count = output.size();
+    int total_count = output.size();
     // reset grads
     CudaLaunchConfig config = GetCudaLaunchConfig(total_count, d);
     SetZero<<<config.block_count, config.thread_per_block, 0, d.stream()>>>(
@@ -346,5 +347,7 @@ struct ROIAlignGrad<GPUDevice, T> {
   }
 };
 }  // namespace functor
+template struct functor::ROIAlignGrad<GPUDevice, float>;
+template struct functor::ROIAlign<GPUDevice, float>;
 }  // namespace tensorflow
 #endif

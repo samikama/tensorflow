@@ -46,7 +46,7 @@ class ROIAlignOp : public tensorflow::OpKernel {
     OP_REQUIRES_OK(context, context->GetAttr("pooled_width", &pooled_width_));
     OP_REQUIRES_OK(context,
                    context->GetAttr("sampling_ratio", &sampling_ratio_));
-    is_nhwc_ = true;
+    is_nhwc_ = false;
     CHECK_GT(spatial_scale_, 0);
     CHECK_GT(pooled_height_, 0);
     CHECK_GT(pooled_width_, 0);
@@ -74,7 +74,7 @@ class ROIAlignOp : public tensorflow::OpKernel {
     if (RoIs.NumElements() == 0) {
       return;
     }
-    tensorflow::GPUDevice d = context->eigen_gpu_device();
+    const GPUDevice &d = context->eigen_device<GPUDevice>();
     typename TTypes<float, 4>::ConstTensor x(X.tensor<float, 4>());
     typename TTypes<float, 2>::ConstTensor rois(RoIs.tensor<float, 2>());
     TTypes<float, 4>::Tensor y(Y->tensor<float, 4>());
@@ -100,7 +100,7 @@ class ROIAlignOpGrad : public tensorflow::OpKernel {
     OP_REQUIRES_OK(context, context->GetAttr("pooled_width", &pooled_width_));
     OP_REQUIRES_OK(context,
                    context->GetAttr("sampling_ratio", &sampling_ratio_));
-    is_nhwc_ = true;
+    is_nhwc_ = false;
     CHECK_GT(spatial_scale_, 0);
     CHECK_GT(pooled_height_, 0);
     CHECK_GT(pooled_width_, 0);
@@ -111,12 +111,9 @@ class ROIAlignOpGrad : public tensorflow::OpKernel {
     const auto grads = context->input(0);
     const auto inputs = context->input(1);
     const auto RoIs = context->input(2);
-    TensorShape output_shape;
     Tensor* output = nullptr;
-    // OP_REQUIRES_OK(context,
-    //                  TensorShapeUtils::MakeShape(shape, &output_shape));
-    OP_REQUIRES_OK(context, context->allocate_output(0, grads.shape(), &output));
-    tensorflow::GPUDevice d = context->eigen_gpu_device();
+    OP_REQUIRES_OK(context, context->allocate_output(0, inputs.shape(), &output));
+    const GPUDevice &d = context->eigen_device<GPUDevice>();
     typename TTypes<float, 4>::ConstTensor input_tensor(
         inputs.tensor<float, 4>());
     typename TTypes<float, 4>::ConstTensor input_grads(

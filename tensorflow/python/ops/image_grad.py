@@ -139,17 +139,17 @@ def _ROIAlignGrad(op, grad):
     gradients w.r.t. box_ind and crop_size.
   """
   original_input = op.inputs[0]
-  rois = op.inputs[0]
+  rois = op.inputs[1]
 
   #allowed_types = [dtypes.float16, dtypes.float32, dtypes.float64]
   allowed_types = [dtypes.float32]
   if op.inputs[0].dtype in allowed_types:
     # pylint: disable=protected-access
     grad0 = gen_roi_align_op.roi_align_grad(
-        grad, op.inputs[1], op.inputs[2],
+        grad, original_input, rois,
         spatial_scale=op.get_attr("spatial_scale"),
-        pooled_h=op.get_attr("pooled_h"),
-        pooled_w=op.get_attr("pooled_w"),
+        pooled_height=op.get_attr("pooled_height"),
+        pooled_width=op.get_attr("pooled_width"),
         sampling_ratio=op.get_attr("sampling_ratio"))
     # pylint: enable=protected-access
   else:
