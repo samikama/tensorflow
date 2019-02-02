@@ -26,6 +26,17 @@ REGISTER_OP("ROIAlign")
     .Attr("pooled_h: int = 1")
     .Attr("pooled_w: int = 1")
     .Attr("sampling_ratio: int = -1")
-    .Attr("data_layout: {'NHWC', 'NCHW'} = 'NHWC'")
     .SetShapeFn(shape_inference::UnknownShape);
+    
+REGISTER_OP("ROIAlignGrad")
+    .Input("grads: float")
+    .Input("input: float")
+    .Input("rois: float")
+    .Output("output: float")
+    .Attr("spatial_scale: float = 1.0")
+    .Attr("pooled_h: int = 1")
+    .Attr("pooled_w: int = 1")
+    .Attr("sampling_ratio: int = -1")
+    .SetShapeFn(shape_inference::UnknownShape);
+
 }

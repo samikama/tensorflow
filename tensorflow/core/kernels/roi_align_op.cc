@@ -46,9 +46,7 @@ class ROIAlignOp : public tensorflow::OpKernel {
     OP_REQUIRES_OK(context, context->GetAttr("pooled_width", &pooled_width_));
     OP_REQUIRES_OK(context,
                    context->GetAttr("sampling_ratio", &sampling_ratio_));
-    string data_layout;
-    OP_REQUIRES_OK(context, context->GetAttr("data_layout", &data_layout));
-    is_nhwc_ = (data_layout == "NHWC");
+    is_nhwc_ = true;
     CHECK_GT(spatial_scale_, 0);
     CHECK_GT(pooled_height_, 0);
     CHECK_GT(pooled_width_, 0);
@@ -67,11 +65,10 @@ class ROIAlignOp : public tensorflow::OpKernel {
       OP_REQUIRES_OK(context,
                      TensorShapeUtils::MakeShape(shape, &output_shape));
     } else {
-        std::vector<int64> shape = {RoIDim0, X.dim_size(1),
-                                    pooled_height_,
-                                    pooled_width_};
-        OP_REQUIRES_OK(context,
-                       TensorShapeUtils::MakeShape(shape, &output_shape));
+      std::vector<int64> shape = {RoIDim0, X.dim_size(1), pooled_height_,
+                                  pooled_width_};
+      OP_REQUIRES_OK(context,
+                     TensorShapeUtils::MakeShape(shape, &output_shape));
     }
     OP_REQUIRES_OK(context, context->allocate_output(0, output_shape, &Y));
     if (RoIs.NumElements() == 0) {
@@ -94,8 +91,55 @@ class ROIAlignOp : public tensorflow::OpKernel {
   bool is_nhwc_;
 };
 
+class ROIAlignOpGrad : public tensorflow::OpKernel {
+ public:
+  explicit ROIAlignOpGrad(tensorflow::OpKernelConstruction* context)
+      : OpKernel(context) {
+    OP_REQUIRES_OK(context, context->GetAttr("spatial_scale", &spatial_scale_));
+    OP_REQUIRES_OK(context, context->GetAttr("pooled_height", &pooled_height_));
+    OP_REQUIRES_OK(context, context->GetAttr("pooled_width", &pooled_width_));
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("sampling_ratio", &sampling_ratio_));
+    is_nhwc_ = true;
+    CHECK_GT(spatial_scale_, 0);
+    CHECK_GT(pooled_height_, 0);
+    CHECK_GT(pooled_width_, 0);
+    CHECK_GE(sampling_ratio_, 0);
+  }
+
+  void Compute(tensorflow::OpKernelContext* context) override {
+    const auto grads = context->input(0);
+    const auto inputs = context->input(1);
+    const auto RoIs = context->input(2);
+    TensorShape output_shape;
+    Tensor* output = nullptr;
+    // OP_REQUIRES_OK(context,
+    //                  TensorShapeUtils::MakeShape(shape, &output_shape));
+    OP_REQUIRES_OK(context, context->allocate_output(0, grads.shape(), &output));
+    tensorflow::GPUDevice d = context->eigen_gpu_device();
+    typename TTypes<float, 4>::ConstTensor input_tensor(
+        inputs.tensor<float, 4>());
+    typename TTypes<float, 4>::ConstTensor input_grads(
+        grads.tensor<float, 4>());
+    typename TTypes<float, 2>::ConstTensor rois(RoIs.tensor<float, 2>());
+    TTypes<float, 4>::Tensor output_grads(output->tensor<float, 4>());
+    functor::ROIAlignGrad<GPUDevice, float>()(
+        d, input_grads, input_tensor, rois, pooled_height_, pooled_width_,
+        sampling_ratio_, spatial_scale_, output_grads);
+  }
+
+ private:
+  float spatial_scale_;
+  int pooled_height_;
+  int pooled_width_;
+  int sampling_ratio_;
+  bool is_nhwc_;
+};
+
 }  // namespace sami
-// REGISTER_KERNEL_BUILDER(Name("ROIAlign").Device(tensorflow::DEVICE_GPU),
-//                         tensorflow::sami::ROIAlignOp);
+ REGISTER_KERNEL_BUILDER(Name("ROIAlign").Device(tensorflow::DEVICE_GPU),
+                         tensorflow::sami::ROIAlignOp);
+ REGISTER_KERNEL_BUILDER(Name("ROIAlignGrad").Device(tensorflow::DEVICE_GPU),
+                         tensorflow::sami::ROIAlignOpGrad);
 }  // namespace tensorflow
 #endif

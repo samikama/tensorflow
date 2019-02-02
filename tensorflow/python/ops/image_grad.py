@@ -22,7 +22,7 @@ from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import gen_image_ops
-
+from tensorflow.python.ops import gen_roi_align_op
 
 @ops.RegisterGradient("ResizeNearestNeighbor")
 def _ResizeNearestNeighborGrad(op, grad):
@@ -124,3 +124,35 @@ def _CropAndResizeGrad(op, grad):
       grad, op.inputs[0], op.inputs[1], op.inputs[2])
 
   return [grad0, grad1, None, None]
+
+@ops.RegisterGradient("ROIAlign")
+def _ROIAlignGrad(op, grad):
+  """The derivatives for ROIAlign.
+
+
+  Args:
+    op: The ROIAlign op.
+    grad: The tensor representing the gradient w.r.t. the output.
+
+  Returns:
+    The gradients w.r.t. the input image, ROIS, as well as the always-None
+    gradients w.r.t. box_ind and crop_size.
+  """
+  original_input = op.inputs[0]
+  rois = op.inputs[0]
+
+  #allowed_types = [dtypes.float16, dtypes.float32, dtypes.float64]
+  allowed_types = [dtypes.float32]
+  if op.inputs[0].dtype in allowed_types:
+    # pylint: disable=protected-access
+    grad0 = gen_roi_align_op.roi_align_grad(
+        grad, op.inputs[1], op.inputs[2],
+        spatial_scale=op.get_attr("spatial_scale"),
+        pooled_h=op.get_attr("pooled_h"),
+        pooled_w=op.get_attr("pooled_w"),
+        sampling_ratio=op.get_attr("sampling_ratio"))
+    # pylint: enable=protected-access
+  else:
+    grad0 = None
+  # gradient wrt rois is 0
+  return [grad0, None]

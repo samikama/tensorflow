@@ -35,9 +35,12 @@ struct ROIAlign {
 template <typename Device, typename T>
 struct ROIAlignGrad {
   void operator()(const Device& d,
-                  typename TTypes<float, 4>::ConstTensor input_grad,
-                  const float height_scale, const float width_scale,
-                  typename TTypes<T, 4>::Tensor output_grad);
+                  typename TTypes<T, 4>::ConstTensor grads,
+                  typename TTypes<T, 4>::ConstTensor inputs,
+                  typename TTypes<T, 2>::ConstTensor rois,
+                  const int pooled_height, const int pooled_width,
+                  const int sampling_ratio, const T spatial_scale,
+                  typename TTypes<T, 4>::Tensor output);
 };
 
 }  // namespace functor
