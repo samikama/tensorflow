@@ -67,4 +67,31 @@ REGISTER_OP("ROIAlignGrad")
       return Status::OK();
     });
 
+REGISTER_OP("GenerateBoundingBoxProposals")
+    .Input("scores: float")
+    .Input("bbox_deltas: float")
+    .Input("image_info: float")
+    .Input("anchors: float")
+    .Output("rois: float")
+    .Output("roi_probabilities: float")
+    .Attr("spatial_scale: float = 0.0625")
+    .Attr("pre_nms_topn: int = 6000")
+    .Attr("post_nms_topn: int = 300")
+    .Attr("nms_threshold: float = 0.7")
+    .Attr("min_size: float = 16")
+    .SetShapeFn([](InferenceContext* c)->Status{
+      // make sure input tensors have are correct rank
+      ShapeHandle scores,images,bounding_boxes,anchors;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 4, &scores));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 4, &bounding_boxes));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 2, &images));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 2, &anchors));
+      // TODO(skama): verify that the inputs are compatible
+      auto roi_shape=c->MakeShape({InferenceContext::kUnknownDim,5});
+      auto prob_shape=c->MakeShape({InferenceContext::kUnknownDim});
+      c->set_output(0,roi_shape);
+      c->set_output(1,prob_shape);
+      return Status::OK();
+    });
+
 }

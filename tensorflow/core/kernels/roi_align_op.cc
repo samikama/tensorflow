@@ -74,7 +74,7 @@ class ROIAlignOp : public tensorflow::OpKernel {
     if (RoIs.NumElements() == 0) {
       return;
     }
-    const GPUDevice &d = context->eigen_device<GPUDevice>();
+    const GPUDevice& d = context->eigen_device<GPUDevice>();
     typename TTypes<float, 4>::ConstTensor x(X.tensor<float, 4>());
     typename TTypes<float, 2>::ConstTensor rois(RoIs.tensor<float, 2>());
     TTypes<float, 4>::Tensor y(Y->tensor<float, 4>());
@@ -112,8 +112,9 @@ class ROIAlignOpGrad : public tensorflow::OpKernel {
     const auto inputs = context->input(1);
     const auto RoIs = context->input(2);
     Tensor* output = nullptr;
-    OP_REQUIRES_OK(context, context->allocate_output(0, inputs.shape(), &output));
-    const GPUDevice &d = context->eigen_device<GPUDevice>();
+    OP_REQUIRES_OK(context,
+                   context->allocate_output(0, inputs.shape(), &output));
+    const GPUDevice& d = context->eigen_device<GPUDevice>();
     typename TTypes<float, 4>::ConstTensor input_tensor(
         inputs.tensor<float, 4>());
     typename TTypes<float, 4>::ConstTensor input_grads(
@@ -134,9 +135,9 @@ class ROIAlignOpGrad : public tensorflow::OpKernel {
 };
 
 }  // namespace sami
- REGISTER_KERNEL_BUILDER(Name("ROIAlign").Device(tensorflow::DEVICE_GPU),
-                         tensorflow::sami::ROIAlignOp);
- REGISTER_KERNEL_BUILDER(Name("ROIAlignGrad").Device(tensorflow::DEVICE_GPU),
-                         tensorflow::sami::ROIAlignOpGrad);
+REGISTER_KERNEL_BUILDER(Name("ROIAlign").Device(tensorflow::DEVICE_GPU),
+                        tensorflow::sami::ROIAlignOp);
+REGISTER_KERNEL_BUILDER(Name("ROIAlignGrad").Device(tensorflow::DEVICE_GPU),
+                        tensorflow::sami::ROIAlignOpGrad);
 }  // namespace tensorflow
 #endif

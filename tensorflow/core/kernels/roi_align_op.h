@@ -25,22 +25,47 @@ namespace functor {
 
 template <typename Device, typename T>
 struct ROIAlign {
-  void operator()(
-      const Device& d, typename TTypes<T, 4>::ConstTensor X,
-      typename TTypes<T, 2>::ConstTensor RoIs, const int pooled_height,
-      const int pooled_width, const int samplig_ratio, const T spatial_scale,
-      typename TTypes<T, 4>::Tensor Y);
+  void operator()(const Device& d, typename TTypes<T, 4>::ConstTensor X,
+                  typename TTypes<T, 2>::ConstTensor RoIs,
+                  const int pooled_height, const int pooled_width,
+                  const int samplig_ratio, const T spatial_scale,
+                  typename TTypes<T, 4>::Tensor Y);
 };
 
 template <typename Device, typename T>
 struct ROIAlignGrad {
-  void operator()(const Device& d,
-                  typename TTypes<T, 4>::ConstTensor grads,
+  void operator()(const Device& d, typename TTypes<T, 4>::ConstTensor grads,
                   typename TTypes<T, 4>::ConstTensor inputs,
                   typename TTypes<T, 2>::ConstTensor rois,
                   const int pooled_height, const int pooled_width,
                   const int sampling_ratio, const T spatial_scale,
                   typename TTypes<T, 4>::Tensor output);
+};
+
+// ignore for now
+template <typename Device, typename T>
+struct NMSGPUUpright {
+  void operator()(const Device& d, typename TTypes<T, 4>::ConstTensor boxes,
+                  const int N, const float treshold, const int max_boxes);
+};
+
+template <typename Device, typename T>
+struct GeneratePreNMSUprightBoxes {
+  void operator()(
+      const Device& d,
+      typename TTypes<T, 4>::ConstTensor
+          digits,  // Scores [N, A, H, W]
+      typename TTypes<T, 4>::ConstTensor
+          bbox_deltas,  // [N, A*4, H, W] (full, unsorted / sliced)
+      typename TTypes<T, 2>::ConstTensor image_shapes,  // (N, 3 ) (h, w, scale) of images
+      typename TTypes<T, 2>::ConstTensor
+          anchors,  // (A,4)
+      const T spatial_scale, const int pre_nms_topN, const int post_nms_topN,
+      const T nms_thresh, const T min_size,const bool correct_transform_coords, 
+      typename TTypes<T, 2>::Tensor conv_layer_indexes,
+      typename TTypes<T, 1>::Tensor image_offset,
+      typename TTypes<T, 2>::Tensor rois,
+      typename TTypes<T, 1>::Tensor roi_probs );
 };
 
 }  // namespace functor

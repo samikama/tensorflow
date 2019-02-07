@@ -2561,7 +2561,7 @@ tf_kernel_library(
 tf_kernel_library(
     name = "roi_align_op",
     prefix = "roi_align_op",
-    deps = IMAGE_DEPS,
+    deps = IMAGE_DEPS + if_cuda(["@cub_archive//:cub"])
 )
 
 tf_kernel_library(
