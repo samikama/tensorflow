@@ -939,7 +939,7 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
     const auto box_dim = anchors.dim_size(1);
     // TODO(skama): make sure that inputs are ok.
     const int K = H * W;
-    VLOG(0)<<"num_images="<<num_images<<" A="<<A<<" H="<<H<<" W="<<W;
+    //VLOG(0)<<"num_images="<<num_images<<" A="<<A<<" H="<<H<<" W="<<W;
     const int conv_layer_nboxes = K * A;
     // The following calls to CUB primitives do nothing
     // (because the first arg is nullptr)
