@@ -420,6 +420,11 @@ __launch_bounds__(
     __syncthreads();  // making sure everyone is done reading smem
   }
 }
+#define CUDA_2D_KERNEL_LOOP(i, n, j, m)                             \
+  for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (n);   \
+       i += blockDim.x * gridDim.x)                                 \
+    for (size_t j = blockIdx.y * blockDim.y + threadIdx.y; j < (m); \
+         j += blockDim.y * gridDim.y)
 
 // This kernel should execute in thenexecute otherwise memcpy and
 tensorflow::Status nms_gpu_upright(const float* d_desc_sorted_boxes_float_ptr,
@@ -552,36 +557,37 @@ tensorflow::Status nms_gpu_upright(const float* d_desc_sorted_boxes_float_ptr,
  * nboxes_to_generate -- pre_nms_topn
  */
 __global__ void GeneratePreNMSUprightBoxesKernel(
-    const Cuda2DLaunchConfig& config, const int* d_sorted_scores_keys,
-    const float* d_bbox_deltas, const float4* d_anchors, const int H,
+    const Cuda2DLaunchConfig config, const int* d_sorted_scores_keys,
+    const float4* d_bbox_deltas, const float4* d_anchors, const int H,
     const int W, const int A, const float feat_stride, const float min_size,
     const float* d_img_info_vec, const float bbox_xform_clip,
     const bool correct_transform, float4* d_out_boxes,
     const int prenms_nboxes,  // leading dimension of out_boxes
     float* d_inout_scores, char* d_boxes_keep_flags) {
   const int K = H * W;
+  const int WA = W * A;
   const int KA = K * A;
-
+  int nboxes_to_generate=config.virtual_thread_count.x;
+  int num_images=config.virtual_thread_count.y;
   CUDA_AXIS_KERNEL_LOOP(image_index, config.virtual_thread_count.y, Y) {
     CUDA_AXIS_KERNEL_LOOP(ibox, config.virtual_thread_count.x, X) {
-      // CUDA_2D_KERNEL_LOOP(ibox, nboxes_to_generate, image_index, num_images)
+      // CUDA_2D_KERNEL_LOOP(ibox, nboxes_to_generate, image_index, num_images){
       // { box_conv_index : # of the same box, but indexed in the scores from
       // the conv layer, of shape (A,H,W) the num_images dimension was already
       // removed box_conv_index = a*K + h*W + w
       const int box_conv_index = d_sorted_scores_keys[image_index * KA + ibox];
 
-      // We want to decompose box_conv_index in (a,h,w)
-      // such as box_conv_index = a*K + h*W + w
+      // We want to decompose box_conv_index in (h,w,a)
+      // such as box_conv_index = h*W*A + W*A + a
       // (avoiding modulos in the process)
       int remaining = box_conv_index;
-      const int dA = K;  // stride of A
-      const int a = remaining / dA;
-      remaining -= a * dA;
-      const int dH = W;  // stride of H
+      const int dH = WA;  // stride of H
       const int h = remaining / dH;
       remaining -= h * dH;
-      const int w = remaining;  // dW = 1
-
+      const int dW = A; // stride of H
+      const int w = remaining/dW;  
+      remaining -= w * dW;
+      const int a = remaining; // dA = 1
       // Loading the anchor a
       // float4 is a struct with float x,y,z,w
       const float4 anchor = d_anchors[a];
@@ -595,21 +601,14 @@ __global__ void GeneratePreNMSUprightBoxesKernel(
 
       // TODO use fast math when possible
 
-      // Deltas for that box
-      // Deltas of shape (num_images,4*A,K)
-      // We're going to compute 4 scattered reads
-      // better than the alternative, ie transposing the complete deltas
-      // array first
-      int deltas_idx = image_index * (KA * 4) + a * 4 * K + h * W + w;
-      const float dx = d_bbox_deltas[deltas_idx];
-      // Stride of K between each dimension
-      deltas_idx += K;
-      const float dy = d_bbox_deltas[deltas_idx];
-      deltas_idx += K;
-      float dw = d_bbox_deltas[deltas_idx];
-      deltas_idx += K;
-      float dh = d_bbox_deltas[deltas_idx];
-
+    // Deltas of shape (N,H,W,A4)
+    int deltas_idx = box_conv_index; 
+     float4 deltas = d_bbox_deltas[deltas_idx];
+     float dx = deltas.x;
+     float dy = deltas.y;
+     float dw = deltas.z;
+     float dh = deltas.w;
+     //printf("deltas_idx=%d dx=%f, dy=%f, dw=%f, dh=%f\n",deltas_idx,dx,dy,dw,dh);
       // Upper bound on dw,dh
       dw = fmin(dw, bbox_xform_clip);
       dh = fmin(dh, bbox_xform_clip);
@@ -635,10 +634,10 @@ __global__ void GeneratePreNMSUprightBoxesKernel(
       }
 
       // Clipping box to image
-      const float img_height = d_img_info_vec[3 * image_index + 0];
-      const float img_width = d_img_info_vec[3 * image_index + 1];
-      const float min_size_scaled =
-          min_size * d_img_info_vec[3 * image_index + 2];
+      const float img_height = d_img_info_vec[2 * image_index + 0];
+      const float img_width = d_img_info_vec[2 * image_index + 1];
+      const float min_size_scaled = min_size;//*0.166667;
+          //min_size * d_img_info_vec[3 * image_index + 2];
       x1 = fmax(fmin(x1, img_width - 1.0f), 0.0f);
       y1 = fmax(fmin(y1, img_height - 1.0f), 0.0f);
       x2 = fmax(fmin(x2, img_width - 1.0f), 0.0f);
@@ -689,14 +688,15 @@ __global__ void WriteUprightBoxesOutput(const CudaLaunchConfig nboxes,
   }
 }
 
-__global__ void InitializeDataKernel(const Cuda2DLaunchConfig& config,
+__global__ void InitializeDataKernel(const Cuda2DLaunchConfig config,
                                      int* d_image_offsets,
                                      int* d_boxes_keys_iota) {
   const int KA = config.virtual_thread_count.x;
   const int num_images = config.virtual_thread_count.y;
-  CUDA_AXIS_KERNEL_LOOP(img_idx, config.virtual_thread_count.y, Y) {
+  //printf("num_images %d KA %d\n",num_images,KA);
+   CUDA_AXIS_KERNEL_LOOP(img_idx, config.virtual_thread_count.y, Y) {
     CUDA_AXIS_KERNEL_LOOP(box_idx, config.virtual_thread_count.x, X) {
-      // CUDA_2D_KERNEL_LOOP(box_idx, KA, img_idx, num_images) {
+   //CUDA_2D_KERNEL_LOOP(box_idx, KA, img_idx, num_images) {
       d_boxes_keys_iota[img_idx * KA + box_idx] = box_idx;
 
       // One 1D line sets the 1D data
@@ -706,7 +706,7 @@ __global__ void InitializeDataKernel(const Cuda2DLaunchConfig& config,
         if (img_idx == 0) d_image_offsets[num_images] = KA * num_images;
       }
     }
-  }
+   }
 }
 
 }  // namespace
@@ -866,7 +866,7 @@ Status AllocatePreNMSTempTensors(
       DataType::DT_FLOAT, TensorShape({num_images * max_postnms_nboxes}),
       dev_postnms_rois_probs));
   TF_RETURN_IF_ERROR(context->allocate_temp(
-      DataType::DT_INT32, TensorShape({num_images}), dev_postnms_rois));
+      DataType::DT_INT32, TensorShape({num_images}), dev_prenms_nboxes));
 
   int64 max_nms_mask_size =
       pre_nms_topn *
@@ -911,12 +911,14 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
     OP_REQUIRES_OK(context, context->GetAttr("post_nms_topn", &post_nms_topn_));
     OP_REQUIRES_OK(context, context->GetAttr("nms_threshold", &nms_threshold_));
     OP_REQUIRES_OK(context, context->GetAttr("min_size", &min_size_));
+    // compatibility for detectron like networks. False for generic case
+    OP_REQUIRES_OK(context, context->GetAttr("correct_transform_coords", &correct_transform_coords_));
     CHECK_GT(spatial_scale_, 0);
     CHECK_GT(pre_nms_topn_, 0);
     CHECK_GT(post_nms_topn_, 0);
     CHECK_GT(nms_threshold_, 0);
     CHECK_GT(min_size_, 0);
-    bbox_xform_clip_default_ = log(1000.0 / 16);
+    bbox_xform_clip_default_ = log(1000.0 / 16.);
   }
 
   void ComputeAsync(tensorflow::OpKernelContext* context,
@@ -931,12 +933,13 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
     const auto image_info = context->input(2);
     const auto anchors = context->input(3);
     const auto num_images = scores.dim_size(0);
-    const auto A = scores.dim_size(1);
-    const auto H = scores.dim_size(2);
-    const auto W = scores.dim_size(3);
+    const auto A = scores.dim_size(3);
+    const auto H = scores.dim_size(1);
+    const auto W = scores.dim_size(2);
     const auto box_dim = anchors.dim_size(1);
     // TODO(skama): make sure that inputs are ok.
     const int K = H * W;
+    VLOG(0)<<"num_images="<<num_images<<" A="<<A<<" H="<<H<<" W="<<W;
     const int conv_layer_nboxes = K * A;
     // The following calls to CUB primitives do nothing
     // (because the first arg is nullptr)
@@ -977,6 +980,7 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
     const GPUDevice& d = context->eigen_device<GPUDevice>();
     Cuda2DLaunchConfig conf2d =
         GetCuda2DLaunchConfig(conv_layer_nboxes, num_images, d);
+
     InitializeDataKernel<<<conf2d.block_count, conf2d.thread_per_block, 0,
                            d.stream()>>>(
         conf2d, d_image_offset.flat<int>().data(),
@@ -997,10 +1001,10 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
     GeneratePreNMSUprightBoxesKernel<<<
         conf2d.block_count, conf2d.thread_per_block, 0, d.stream()>>>(
         conf2d, d_sorted_conv_layer_indexes.flat<int>().data(),
-        bbox_deltas.flat<float>().data(),
+        reinterpret_cast<const float4*>(bbox_deltas.flat<float>().data()),
         reinterpret_cast<const float4*>(anchors.flat<float>().data()), H, W, A,
         feat_stride_, min_size_, image_info.flat<float>().data(),
-        bbox_xform_clip_default_, false,
+        bbox_xform_clip_default_, correct_transform_coords_,
         reinterpret_cast<float4*>(dev_boxes.flat<float>().data()),
         nboxes_to_generate, dev_sorted_scores.flat<float>().data(),
         (char*)dev_boxes_keep_flags.flat<int8>().data());
@@ -1131,6 +1135,7 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
   float min_size_;
   float feat_stride_;
   float bbox_xform_clip_default_;
+  bool correct_transform_coords_;
 };
 
 #undef GENRPN_BOXES_PER_THREAD

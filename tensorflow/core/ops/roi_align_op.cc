@@ -79,16 +79,17 @@ REGISTER_OP("GenerateBoundingBoxProposals")
     .Attr("post_nms_topn: int = 300")
     .Attr("nms_threshold: float = 0.7")
     .Attr("min_size: float = 16")
+    .Attr("correct_transform_coords: bool = true")
     .SetShapeFn([](InferenceContext* c)->Status{
       // make sure input tensors have are correct rank
       ShapeHandle scores,images,bounding_boxes,anchors;
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 4, &scores));
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 4, &bounding_boxes));
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 2, &images));
-      TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 2, &anchors));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 4, &scores));  //(N, H, W, A)
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 4, &bounding_boxes));  //(N,H,W,A4)
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 2, &images)); // (N,2)
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 2, &anchors)); // (A,4)
       // TODO(skama): verify that the inputs are compatible
-      auto roi_shape=c->MakeShape({InferenceContext::kUnknownDim,5});
-      auto prob_shape=c->MakeShape({InferenceContext::kUnknownDim});
+      auto roi_shape=c->MakeShape({InferenceContext::kUnknownDim,5}); //(N,5)
+      auto prob_shape=c->MakeShape({InferenceContext::kUnknownDim}); // (N)
       c->set_output(0,roi_shape);
       c->set_output(1,prob_shape);
       return Status::OK();
