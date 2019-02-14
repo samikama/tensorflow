@@ -233,8 +233,8 @@ TF_CALL_GPU_NUMBER_TYPES_NO_HALF(REGISTER_SYCL_KERNEL);
                               .HostMemory("is_initialized"),               \
                           IsVariableInitializedOp);
 
-TF_CALL_GPU_NUMBER_TYPES(REGISTER_GPU_KERNELS);
-TF_CALL_int64(REGISTER_GPU_KERNELS);
+TF_CALL_REAL_NUMBER_TYPES_NO_BFLOAT16(REGISTER_GPU_KERNELS);
+//TF_CALL_int64(REGISTER_GPU_KERNELS);
 #undef REGISTER_GPU_KERNELS
 #endif  // GOOGLE_CUDA
 
