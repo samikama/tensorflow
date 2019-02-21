@@ -3098,6 +3098,7 @@ tf_cuda_library(
         "//third_party/eigen3",
         "//tensorflow/core/grappler/utils:functions",
     ] + mkl_deps(),
+    cuda_deps = ["@local_config_cuda//cuda:cuda"],
     alwayslink = 1,
 )
 

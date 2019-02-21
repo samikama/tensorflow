@@ -161,6 +161,18 @@ cc_library(
 )
 
 cc_library(
+    name = "nvToolsExt",
+    srcs = ["cuda/lib/%{nvtoolsext_lib}"],
+    data = ["cuda/lib/%{nvtoolsext_lib}"],
+    includes = [
+        ".",
+        "cuda/include",
+    ],
+    linkstatic = 1,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda",
     visibility = ["//visibility:public"],
     deps = [
@@ -170,6 +182,7 @@ cc_library(
         ":cudnn",
         ":cufft",
         ":curand",
+        ":nvToolsExt",
     ],
 )
 
