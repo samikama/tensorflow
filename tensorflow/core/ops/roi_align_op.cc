@@ -88,8 +88,40 @@ REGISTER_OP("GenerateBoundingBoxProposals")
       TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 2, &images)); // (N,2)
       TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 2, &anchors)); // (A,4)
       // TODO(skama): verify that the inputs are compatible
-      auto roi_shape=c->MakeShape({InferenceContext::kUnknownDim,5}); //(N,5)
-      auto prob_shape=c->MakeShape({InferenceContext::kUnknownDim}); // (N)
+      auto roi_shape=c->MakeShape({InferenceContext::kUnknownDim,5}); //(K,5)
+      auto prob_shape=c->MakeShape({InferenceContext::kUnknownDim}); // (K)
+      c->set_output(0,roi_shape);
+      c->set_output(1,prob_shape);
+      return Status::OK();
+    });
+
+REGISTER_OP("GenerateBoundingBoxProposalsV2")
+    .Input("scores: float")
+    .Input("bbox_deltas: float")
+    .Input("image_info: float")
+    .Input("anchors: float")
+    .Output("rois: float")
+    .Output("roi_probabilities: float")
+    .Attr("spatial_scale: float = 0.0625")
+    .Attr("pre_nms_topn: int = 6000")
+    .Attr("post_nms_topn: int = 300")
+    .Attr("nms_threshold: float = 0.7")
+    .Attr("min_size: float = 16")
+    .Attr("correct_transform_coords: bool = true")
+    .SetShapeFn([](InferenceContext* c)->Status{
+      // make sure input tensors have are correct rank
+      ShapeHandle scores,images,bounding_boxes,anchors;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 4, &scores));  //(N, H, W, A)
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 4, &bounding_boxes));  //(N,H,W,A4)
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 2, &images)); // (N,5)
+      auto im_info=c->Dim(images,1);
+      TF_RETURN_IF_ERROR(c->WithValue(im_info,5,&im_info));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 3, &anchors)); // (A4)
+      // TODO(skama): verify that the inputs are compatible
+      int post_nms_top_n;
+      TF_RETURN_IF_ERROR(c->GetAttr("post_nms_topn",&post_nms_top_n));
+      auto roi_shape=c->MakeShape({c->Dim(scores,0),post_nms_top_n,4}); //(N,post_nms_top_n,4)
+      auto prob_shape=c->MakeShape({c->Dim(scores,0),post_nms_top_n}); // (N,post_nms_top_n)
       c->set_output(0,roi_shape);
       c->set_output(1,prob_shape);
       return Status::OK();
