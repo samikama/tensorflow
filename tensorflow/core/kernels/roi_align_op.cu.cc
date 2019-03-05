@@ -27,6 +27,7 @@ limitations under the License.
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/cuda_device_functions.h"
 #include "tensorflow/core/util/cuda_kernel_helper.h"
+#include "third_party/cub/device/device_radix_sort.cuh"
 #include "third_party/cub/device/device_segmented_radix_sort.cuh"
 #include "third_party/cub/device/device_select.cuh"
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
@@ -41,19 +42,21 @@ typedef Eigen::GpuDevice GPUDevice;
     cudaError_t error = condition;                            \
     CHECK(error == cudaSuccess) << cudaGetErrorString(error); \
   } while (0)
+
 namespace {
+
 template <typename T>
-EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE T
-bilinear_interpolate(const T* bottom_data, const int height, const int width,
-                     T y, T x, const int index /* index for debug only*/) {
+EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE T bilinear_interpolate(
+    const T* bottom_data, const int height, const int width, T y, T x,
+    const int index, /* index for debug only*/ const T* lower_bound = nullptr,
+    const T* upper_bound = nullptr, int chann = -1) {
   // deal with cases that inverse elements are out of feature map boundary
   if (y < -1.0 || y > height || x < -1.0 || x > width) {
     // empty
     return 0;
   }
-
-  if (y <= 0) y = 0;
-  if (x <= 0) x = 0;
+  if (y <= 0) y = 0.;
+  if (x <= 0) x = 0.;
 
   int y_low = (int)y;
   int x_low = (int)x;
@@ -82,6 +85,22 @@ bilinear_interpolate(const T* bottom_data, const int height, const int width,
   T v2 = bottom_data[y_low * width + x_high];
   T v3 = bottom_data[y_high * width + x_low];
   T v4 = bottom_data[y_high * width + x_high];
+  if (lower_bound && upper_bound &&
+      (bottom_data + (y_low * width + x_low) < lower_bound) &&
+      (bottom_data + (y_high * width + x_high) > upper_bound)) {
+    printf("index=%d min=%p max=%p upper=%p lower=%p\n",
+           (bottom_data + (y_low * width + x_low)),
+           (bottom_data + (y_high * width + x_high)), upper_bound, lower_bound);
+  }
+  if (chann >= 0 && chann < 4) {
+    int diff = bottom_data - lower_bound;
+    printf(
+        " BI y=%f x=%f yl=%d yh=%d xl=%d xh=%d w=%d h=%d c=%d index=%d "
+        "offset%d %d %d %d\n",
+        y, x, y_low, y_high, x_low, x_high, width, height, chann, index,
+        diff + y_low * width + x_low, diff + y_low * width + x_high,
+        diff + y_high * width + x_low, diff + y_high * width + x_high);
+  }
   T w1 = hy * hx, w2 = hy * lx, w3 = ly * hx, w4 = ly * lx;
 
   T val = (w1 * v1 + w2 * v2 + w3 * v3 + w4 * v4);
@@ -93,7 +112,8 @@ template <typename T>
 EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC void bilinear_interpolate_gradient(
     const int height, const int width, T y, T x, T& w1, T& w2, T& w3, T& w4,
     int& x_low, int& x_high, int& y_low, int& y_high,
-    const int index /* index for debug only*/) {
+    const int index /* index for debug only*/, const int level = -1,
+    int chann = -1) {
   // deal with cases that inverse elements are out of feature map boundary
   if (y < -1.0 || y > height || x < -1.0 || x > width) {
     // empty
@@ -132,10 +152,184 @@ EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC void bilinear_interpolate_gradient(
   // T v3 = bottom_data[y_high * width + x_low];
   // T v4 = bottom_data[y_high * width + x_high];
   // T val = (w1 * v1 + w2 * v2 + w3 * v3 + w4 * v4);
+  if (chann >= 0 and chann < 4)
+    printf(
+        "BIG y=%f x=%f yl=%d yh=%d xl=%d xh=%d w=%d h=%d hx=%f hy=%f lx=%f "
+        "ly=%f level=%d index=%d\n",
+        y, x, y_low, y_high, x_low, x_high, width, height, hx, hy, lx, ly,
+        level, index);
 
   w1 = hy * hx, w2 = hy * lx, w3 = ly * hx, w4 = ly * lx;
 
   return;
+}
+
+__global__ void box_iou_kernel(Cuda2DLaunchConfig config, float4* boxes, float4* ground_truths, long M,
+                               long N, float* box_iou) {
+  float xmin1, xmin2, xmax1, xmax2, ymin1, ymin2, ymax1, ymax2, x_tl, y_tl,
+      x_br, y_br, w, h, inter, area1, area2, iou;
+  size_t b1_idx, b2_idx, b1_row_offset, b2_row_offset;
+  CUDA_AXIS_KERNEL_LOOP(img_count, config.virtual_thread_count.y, Y) {
+    CUDA_AXIS_KERNEL_LOOP(i, config.virtual_thread_count.x, X) {
+      b1_idx = i / N;
+      b2_idx = i % N;
+      b1_row_offset = b1_idx + img_count * M;
+      b2_row_offset = b2_idx + img_count * N;
+
+      xmin1 = boxes[b1_row_offset].x;
+      ymin1 = boxes[b1_row_offset].y;
+      xmax1 = boxes[b1_row_offset].z;
+      ymax1 = boxes[b1_row_offset].w;
+      xmin2 = ground_truths[b2_row_offset].x;
+      ymin2 = ground_truths[b2_row_offset].y;
+      xmax2 = ground_truths[b2_row_offset].z;
+      ymax2 = ground_truths[b2_row_offset].w;
+      if (ymin1 < 0. && ymin2 < 0.0) {
+        box_iou[img_count * M * N + b1_idx * N + b2_idx] = -1;
+      } else {
+        x_tl = fmaxf(xmin1, xmin2);
+        y_tl = fmaxf(ymin1, ymin2);
+
+        x_br = fminf(xmax1, xmax2);
+        y_br = fminf(ymax1, ymax2);
+        w = (x_br - x_tl + 1) < 0 ? 0.0f : (x_br - x_tl + 1);
+        h = (y_br - y_tl + 1) < 0 ? 0.0f : (y_br - y_tl + 1);
+        inter = w * h;
+        area1 = (xmax1 - xmin1 + 1) * (ymax1 - ymin1 + 1);
+        area2 = (xmax2 - xmin2 + 1) * (ymax2 - ymin2 + 1);
+        iou = inter / (area1 + area2 - inter);
+        box_iou[img_count * M * N + b1_idx * N + b2_idx] = iou;
+      }
+    }
+  }
+}
+
+__launch_bounds__(256) static __global__
+    void max_along_gt_idx(float* match, unsigned char* pred_forgiven,
+                          long* max_gt_idx, long long gt, long long preds,
+                          bool include_low_quality, float low_th,
+                          float high_th) {
+  long long tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid < preds) {
+    float max_iou = 0.0f;
+    int max_idx = 0;
+    float iou;
+    for (long long i = 0; i < gt; i++) {
+      iou = match[i * preds + tid];
+      if (iou > max_iou) {
+        max_iou = iou;
+        max_idx = i;
+      }
+    }
+    if (max_iou >= high_th)
+      max_gt_idx[tid] = max_idx;
+    else if ((pred_forgiven[tid] == 1 && include_low_quality))
+      max_gt_idx[tid] = max_idx;
+    else if (max_iou < low_th)
+      max_gt_idx[tid] = -1;
+    else if (max_iou < high_th)
+      max_gt_idx[tid] = -2;
+  }
+}
+__device__ void warpReduce(volatile float* sdata, int tid) {
+  sdata[tid] = fmax(sdata[tid], sdata[tid + 32]);
+  sdata[tid] = fmax(sdata[tid], sdata[tid + 16]);
+  sdata[tid] = fmax(sdata[tid], sdata[tid + 8]);
+  sdata[tid] = fmax(sdata[tid], sdata[tid + 4]);
+  sdata[tid] = fmax(sdata[tid], sdata[tid + 2]);
+  sdata[tid] = fmax(sdata[tid], sdata[tid + 1]);
+}
+
+static __global__ void max_along_preds(float* match, float* inter_gt,
+                                       long long gt, long long preds) {
+  int gt_idx = blockIdx.x;
+  int chunk_idx = blockIdx.y;
+  int gt_offset = chunk_idx * 2048;
+  int start_idx = gt_idx * preds + gt_offset;
+  int idx = threadIdx.x;
+  __shared__ float shbuf[1024];
+  shbuf[idx] = 0.0f;
+  __syncthreads();
+  if (gt_offset + idx + 1024 < preds)
+    shbuf[idx] = fmax(match[start_idx + idx], match[start_idx + idx + 1024]);
+  else if (gt_offset + idx < preds)
+    shbuf[idx] = match[start_idx + idx];
+  __syncthreads();
+  if (idx < 512) shbuf[idx] = fmax(shbuf[idx], shbuf[idx + 512]);
+  __syncthreads();
+  if (idx < 256) shbuf[idx] = fmax(shbuf[idx], shbuf[idx + 256]);
+  __syncthreads();
+  if (idx < 128) shbuf[idx] = fmax(shbuf[idx], shbuf[idx + 128]);
+  __syncthreads();
+  if (idx < 64) shbuf[idx] = fmax(shbuf[idx], shbuf[idx + 64]);
+  __syncthreads();
+  if (idx < 32) warpReduce(shbuf, idx);
+  if (idx == 0)
+    inter_gt[((preds + 2047) / 2048) * gt_idx + chunk_idx] = shbuf[idx];
+}
+
+__launch_bounds__(256) static __global__
+    void max_along_preds_reduced(float* match, float* max_preds, long long gt,
+                                 long long preds) {
+  long long tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid < gt) {
+    float max_iou = 0.0f;
+    float iou;
+    for (long long i = 0; i < preds; i++) {
+      iou = match[tid * preds + i];
+      if (iou > max_iou) max_iou = iou;
+    }
+    max_preds[tid] = max_iou;
+  }
+}
+
+__launch_bounds__(256) static __global__
+    void forgive_preds(float* match_quality_data, float* d_best_pred_per_gt,
+                       unsigned char* d_pred_forgiven, long gt, long preds) {
+  long tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid < preds) {
+    unsigned char forgiven = 0;
+    float iou;
+    for (int i = 0; i < gt; i++) {
+      iou = match_quality_data[i * preds + tid];
+      if (iou == d_best_pred_per_gt[i]) {
+        forgiven = 1;
+        break;
+      }
+    }
+    d_pred_forgiven[tid] = forgiven;
+  }
+}
+
+__global__ void box_encode_kernel(CudaLaunchConfig config, const float4* boxes,
+                                  const float4* anchors, const float wx,
+                                  const float wy, const float ww,
+                                  const float wh, const float* labels,
+                                  float4* output) {
+  CUDA_1D_KERNEL_LOOP(i, config.virtual_thread_count) {
+    float4& out = output[i];
+    if (labels[i] > 0) {
+      const float4& box = boxes[i];
+      const float4& anch = anchors[i];
+      float bw = box.w - box.y + 1.0;  // layout is [y1,x1,y2,x2]
+      float bh = box.z - box.x + 1.0;
+      float bcx = box.y + 0.5 * bw;
+      float bcy = box.x + 0.5 * bh;
+      float aw = anch.w - anch.y;  // layout is [y1,x1,y2,x2]
+      float ah = anch.z - anch.x;
+      float acx = anch.y + 0.5 * aw;
+      float acy = anch.x + 0.5 * ah;
+      out.y = wx * (acx - bcx) / bw;
+      out.x = wy * (acy - bcy) / bh;
+      out.w = wh * log(ah / bh);
+      out.z = ww * log(aw / bw);
+    } else {
+      out.x = 0.;
+      out.y = 0.;
+      out.z = 0.;
+      out.w = 0.;
+    }
+  }
 }
 
 template <typename T>
@@ -209,6 +403,155 @@ __global__ void RoIAlignForward(const CudaLaunchConfig nthreads,
     output_val /= count;
 
     top_data[index] = output_val;
+  }
+}
+
+// scale [y1,x1,y2,x2] boxes with level calculated with eq1 in FPN paper
+// arXiv:1612.03144 and return levels and scaled boxes
+template <typename T>
+__global__ void Boxes2ScaledBoxesAndLevels(const CudaLaunchConfig config,
+                                           const T* boxes, int min_level,
+                                           int max_level, float canonical_scale,
+                                           int canonical_level, int* levels,
+                                           T* scaled_boxes,
+                                           bool is_bw = false) {
+  CUDA_1D_KERNEL_LOOP(i, config.virtual_thread_count) {
+    const T* box = boxes + i * 4;
+    T* scaled_box = scaled_boxes + i * 4;
+    T y1 = box[0];
+    T x1 = box[1];
+    T y2 = box[2];
+    T x2 = box[3];
+    T height = y2 - y1;
+    T width = x2 - x1;
+    T box_area_sqrt = sqrtf(width * height);
+    int level =
+        max(min_level,
+            min((int)floorf(canonical_level +
+                            __log2f(box_area_sqrt / canonical_scale + 1e-6f)),
+                max_level));
+    levels[i] = level - min_level;
+    // if (levels[i] > 10 || levels[i] < -10)
+    //   printf("level=%d min=%d max=%d h=%f w=%f sqa=%f l2=%f floor=%f\n",
+    //   level,
+    //          min_level, max_level, height, width, box_area_sqrt,
+    //          __log2f(box_area_sqrt / canonical_scale + 1e-6f),
+    //          floorf(__log2f(box_area_sqrt / canonical_scale + 1e-6f) +
+    //                 canonical_level));
+    T level_scale = 1 << level;
+
+    printf(
+        "BS level=%d scale=%f min=%d max=%d h=%f w=%f sqa=%f l2=%f floor=%f "
+        "i=%d is_bw=%d\n",
+        level, level_scale, min_level, max_level, height, width, box_area_sqrt,
+        __log2f(box_area_sqrt / canonical_scale + 1e-6f),
+        floorf(__log2f(box_area_sqrt / canonical_scale + 1e-6f) +
+               canonical_level),
+        i, is_bw);
+    scaled_box[0] = y1 / level_scale;
+    scaled_box[1] = x1 / level_scale;
+    scaled_box[2] = height / level_scale;
+    scaled_box[3] = width / level_scale;
+  }
+}
+
+template <typename T>
+__global__ void RoIAlignForwardV2(
+    const Cuda2DLaunchConfig nthreads, const T* bottom_data,
+    const T spatial_scale, const int num_levels, const int channels,
+    const int height, const int width, const int n_rois,
+    const int pooled_height, const int pooled_width, const int sampling_ratio,
+    const T* scaled_roi_boxes, const int32* levels, int roi_cols, T* top_data) {
+  CUDA_AXIS_KERNEL_LOOP(image_index, nthreads.virtual_thread_count.y, Y) {
+    CUDA_AXIS_KERNEL_LOOP(index, nthreads.virtual_thread_count.x, X) {
+      // CUDA_1D_KERNEL_LOOP(index, nthreads.virtual_thread_count) {
+      // (n, c, ph, pw) is an element in the pooled output
+      //  returns (b,n,c,h,w)
+      int pw = index % pooled_width;
+      int ph = (index / pooled_width) % pooled_height;
+      int c = (index / pooled_width / pooled_height) % channels;
+      int n = index / pooled_width / pooled_height / channels;
+
+      // RoI could have 4 or 5 columns
+      const T* offset_bottom_rois =
+          scaled_roi_boxes + image_index * n_rois * roi_cols + n * roi_cols;
+      T roi_start_w = offset_bottom_rois[1] * spatial_scale;
+      T roi_start_h = offset_bottom_rois[0] * spatial_scale;
+      if (image_index * n_rois * roi_cols + n * roi_cols >= 512 * 4)
+        printf("index=%d roi_offset=%d\n", index,
+               image_index * n_rois * roi_cols + n * roi_cols);
+      // Do not using rounding; this implementation detail is critical
+      // T roi_start_w = roundf(offset_bottom_rois[0] * spatial_scale);
+      // T roi_start_h = roundf(offset_bottom_rois[1] * spatial_scale);
+      // T roi_end_w = roundf(offset_bottom_rois[2] * spatial_scale);
+      // T roi_end_h = roundf(offset_bottom_rois[3] * spatial_scale);
+
+      // Force malformed ROIs to be 1x1
+      T roi_width = Eigen::numext::maxi(offset_bottom_rois[3], (T)1.);
+      T roi_height = Eigen::numext::maxi(offset_bottom_rois[2], (T)1.);
+      T bin_size_h = static_cast<T>(roi_height) / static_cast<T>(pooled_height);
+      T bin_size_w = static_cast<T>(roi_width) / static_cast<T>(pooled_width);
+      int level = levels[image_index * n_rois + n];
+      const T* offset_bottom_data =
+          bottom_data + image_index * height * width * channels * num_levels +
+          height * width * channels * level + c * height * width;
+      if (image_index * height * width * channels * num_levels +
+              height * width * channels * level + c * height * width >=
+          5 * 256 * 256 * 256)
+        printf(
+            "index=%d feature_offset=%d im=%d, h=%d w=%d ch=%d nl=%d l=%d "
+            "c=%d "
+            "n=%d\n",
+            index,
+            image_index * height * width * channels * num_levels +
+                height * width * channels * level + c * height * width,
+            image_index, height, width, channels, num_levels, level, c, n);
+      // We use roi_bin_grid to sample the grid and mimic integral
+      int roi_bin_grid_h = (sampling_ratio > 0)
+                               ? sampling_ratio
+                               : ceil(roi_height / pooled_height);  // e.g., = 2
+      int roi_bin_grid_w = (sampling_ratio > 0)
+                               ? sampling_ratio
+                               : ceil(roi_width / pooled_width);
+
+      // We do average (integral) pooling inside a bin
+      const T count = roi_bin_grid_h * roi_bin_grid_w;  // e.g. = 4
+
+      T output_val = 0.;
+      int level_height = (T)height / (T)(1 << level);
+      int level_width = (T)width / (T)(1 << level);
+      for (int iy = 0; iy < roi_bin_grid_h; iy++)  // e.g., iy = 0, 1
+      {
+        const T y = roi_start_h + ph * bin_size_h +
+                    static_cast<T>(iy + .5f) * bin_size_h /
+                        static_cast<T>(roi_bin_grid_h);  // e.g., 0.5, 1.5
+        for (int ix = 0; ix < roi_bin_grid_w; ix++) {
+          const T x = roi_start_w + pw * bin_size_w +
+                      static_cast<T>(ix + .5f) * bin_size_w /
+                          static_cast<T>(roi_bin_grid_w);
+          if (c >= 0 && c < 4)
+            printf(
+                "AL im=%d, h=%d w=%d lh=%d lw=%d ch=%d nl=%d l=%d pw=%d "
+                "ph=%d "
+                "c=%d n=%d "
+                "x=%f y=%f index=%d offset=%d\n",
+                image_index, height, width, level_height, level_width, channels,
+                num_levels, level, pw, ph, c, n, x, y, index);
+          T val = bilinear_interpolate(offset_bottom_data, level_height,
+                                       level_width, y, x, index, bottom_data,
+                                       bottom_data + (5 * 256 * 256 * 256), c);
+          output_val += val;
+        }
+      }
+      output_val /= count;
+
+      top_data[nthreads.virtual_thread_count.x * image_index + index] =
+          output_val;
+      if (nthreads.virtual_thread_count.x * image_index + index >=
+          512 * 256 * 7 * 7)
+        printf("index=%d output_offset=%d\n", index,
+               nthreads.virtual_thread_count.x * image_index + index);
+    }
   }
 }
 
@@ -305,6 +648,116 @@ __global__ void RoIAlignBackwardFeature(
   }        // CUDA_1D_KERNEL_LOOP
 }  // RoIAlignBackward
 
+template <typename T>
+__global__ void RoIAlignBackwardFeatureV2(
+    const Cuda2DLaunchConfig nthreads,
+    const T* inp_grads,  // grads
+    const T spatial_scale, const int num_levels, const int channels,
+    const int height, const int width, const int n_rois,
+    const int pooled_height, const int pooled_width, const int sampling_ratio,
+    const int roi_cols, const T* input_rois,
+    int32* levels,  // scaled rois,  levels
+    T* output_grads /* input_grad */) {
+  CUDA_AXIS_KERNEL_LOOP(image_index, nthreads.virtual_thread_count.y, Y) {
+    CUDA_AXIS_KERNEL_LOOP(index, nthreads.virtual_thread_count.x, X) {
+      // CUDA_1D_KERNEL_LOOP(index, nthreads.virtual_thread_count) {
+      // (n, c, ph, pw) is an element in the pooled output
+      int pw = index % pooled_width;
+      int ph = (index / pooled_width) % pooled_height;
+      int c = (index / pooled_width / pooled_height) % channels;
+      int n = index / pooled_width / pooled_height / channels;
+      // this part is buggy in caffe2. Inputs are allowed to be 4 or 5 columns
+      // but caffe2 implementation gradient assumes 5 columns
+      const T* offset_input_rois =
+          input_rois + image_index * n_rois * roi_cols + n * roi_cols;
+      if (image_index * n_rois * roi_cols + n * roi_cols >= 512 * 4)
+        printf("index=%d roi_offset=%d\n", index,
+               image_index * n_rois * roi_cols + n * roi_cols);
+
+      // Do not using rounding; this implementation detail is critical
+      T roi_start_w = offset_input_rois[1] * spatial_scale;
+      T roi_start_h = offset_input_rois[0] * spatial_scale;
+      // T roi_start_w = roundf(offset_input_rois[1] * spatial_scale);
+      // T roi_start_h = roundf(offset_input_rois[2] * spatial_scale);
+      // T roi_end_w = roundf(offset_input_rois[3] * spatial_scale);
+      // T roi_end_h = roundf(offset_input_rois[4] * spatial_scale);
+
+      // Force malformed ROIs to be 1x1
+      T roi_width = Eigen::numext::maxi(offset_input_rois[3], (T)1.);
+      T roi_height = Eigen::numext::maxi(offset_input_rois[2], (T)1.);
+      T bin_size_h = static_cast<T>(roi_height) / static_cast<T>(pooled_height);
+      T bin_size_w = static_cast<T>(roi_width) / static_cast<T>(pooled_width);
+      int level = levels[n];
+      T* offset_output_grads =
+          output_grads + image_index * height * width * channels * num_levels +
+          height * width * channels * level + c * height * width;
+      // image_index*(pooled_height*pooled_width*channels*num_rois)+(n*channels*pooled_height*pooled_width)+(c*pooled_height*pooled_width);
+      int inp_grad_offset =
+          (image_index * n_rois * channels + n * channels + c) * pooled_height *
+          pooled_width;
+      const T* offset_inp_grads = inp_grads + inp_grad_offset;
+      const T inp_grads_this_bin = offset_inp_grads[ph * pooled_width + pw];
+      if (isnan(inp_grads_this_bin)) {
+        printf(
+            "seen nan in grads index=%d feature_offset=%d im=%d, h=%d w=%d "
+            "ch=%d nl=%d l=%d c=%d n=%d ph=%d pw=%d pooled_width=%d\n",
+            index, inp_grad_offset, image_index, height, width, channels,
+            num_levels, level, c, n, ph, pw, pooled_width);
+      }
+      // We use roi_bin_grid to sample the grid and mimic integral
+      int roi_bin_grid_h = (sampling_ratio > 0)
+                               ? sampling_ratio
+                               : ceil(roi_height / pooled_height);  // e.g., = 2
+      int roi_bin_grid_w = (sampling_ratio > 0)
+                               ? sampling_ratio
+                               : ceil(roi_width / pooled_width);
+
+      // We do average (integral) pooling inside a bin
+      const T count = roi_bin_grid_h * roi_bin_grid_w;  // e.g. = 4
+      int level_height = (T)height / (T)(1 << level);
+      int level_width = (T)width / (T)(1 << level);
+
+      for (int iy = 0; iy < roi_bin_grid_h; iy++)  // e.g., iy = 0, 1
+      {
+        const T y = roi_start_h + ph * bin_size_h +
+                    static_cast<T>(iy + .5f) * bin_size_h /
+                        static_cast<T>(roi_bin_grid_h);  // e.g., 0.5, 1.5
+        for (int ix = 0; ix < roi_bin_grid_w; ix++) {
+          const T x = roi_start_w + pw * bin_size_w +
+                      static_cast<T>(ix + .5f) * bin_size_w /
+                          static_cast<T>(roi_bin_grid_w);
+
+          T w1, w2, w3, w4;
+          int x_low, x_high, y_low, y_high;
+
+          bilinear_interpolate_gradient(level_height, level_width, y, x, w1, w2,
+                                        w3, w4, x_low, x_high, y_low, y_high,
+                                        index, level, c);
+
+          T g1 = inp_grads_this_bin * w1 / count;
+          T g2 = inp_grads_this_bin * w2 / count;
+          T g3 = inp_grads_this_bin * w3 / count;
+          T g4 = inp_grads_this_bin * w4 / count;
+          if ((isnan(g1) || isnan(g2) || isnan(g3) || isnan(g4)) &&
+              index < 20) {
+            printf("nan in gs g1=%d g2=%d g3=%d g4=%d count=%d\n", g1, g2, g3,
+                   g4, count);
+          }
+          if (x_low >= 0 && x_high >= 0 && y_low >= 0 && y_high >= 0) {
+            CudaAtomicAdd(offset_output_grads + y_low * width + x_low,
+                          static_cast<T>(g1));
+            CudaAtomicAdd(offset_output_grads + y_low * width + x_high,
+                          static_cast<T>(g2));
+            CudaAtomicAdd(offset_output_grads + y_high * width + x_low,
+                          static_cast<T>(g3));
+            CudaAtomicAdd(offset_output_grads + y_high * width + x_high,
+                          static_cast<T>(g4));
+          }  // if
+        }    // ix
+      }      // iy
+    }        // CUDA_1D_KERNEL_LOOP
+  }          // RoIAlignBackward
+}
 //  Adding caffe defines here
 //
 //
@@ -344,6 +797,7 @@ inline dim3 CAFFE_GET_BLOCKS_2D(const int N, const int /* M */) {
 const dim3 CAFFE_CUDA_NUM_THREADS_2D = {
     static_cast<unsigned int>(CAFFE_CUDA_NUM_THREADS_2D_DIMX),
     static_cast<unsigned int>(CAFFE_CUDA_NUM_THREADS_2D_DIMY), 1u};
+
 __launch_bounds__(
     CAFFE_CUDA_NUM_THREADS_2D_DIMX* CAFFE_CUDA_NUM_THREADS_2D_DIMY,
     4) __global__
@@ -420,6 +874,7 @@ __launch_bounds__(
     __syncthreads();  // making sure everyone is done reading smem
   }
 }
+
 #define CUDA_2D_KERNEL_LOOP(i, n, j, m)                             \
   for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < (n);   \
        i += blockDim.x * gridDim.x)                                 \
@@ -444,19 +899,19 @@ tensorflow::Status nms_gpu_upright(const float* d_desc_sorted_boxes_float_ptr,
   int* d_delete_mask = dev_delete_mask;
   auto stream_exec = context->op_device_context()->stream();
   auto device = context->eigen_gpu_device();
-  //printf("n=%d mask_id=%d\n",N,mask_ld);
+  // printf("n=%d mask_id=%d\n",N,mask_ld);
   NMSKernel<<<CAFFE_GET_BLOCKS_2D(N, mask_ld), CAFFE_CUDA_NUM_THREADS_2D, 0,
               device.stream()>>>(d_desc_sorted_boxes, N, thresh, mask_ld,
                                  d_delete_mask);
   int* h_delete_mask = host_delete_mask;
-  CHECK_EQ(cudaGetLastError(),CUDA_SUCCESS);
+  CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
   // Overlapping CPU computes and D2H memcpy
   // both take about the same time
   int nto_copy = std::min(NMS_CHUNK_SIZE, N);
   cudaEvent_t copy_done;
   cudaEventCreate(&copy_done);
   device.memcpyDeviceToHost(&h_delete_mask[0], &d_delete_mask[0],
-                       nto_copy * mask_ld * sizeof(int));
+                            nto_copy * mask_ld * sizeof(int));
   // CUDA_CHECK(cudaMemcpyAsync(&h_delete_mask[0], &d_delete_mask[0],
   //                            nto_copy * mask_ld * sizeof(int),
   //                            cudaMemcpyDeviceToHost, device.stream()));
@@ -474,8 +929,8 @@ tensorflow::Status nms_gpu_upright(const float* d_desc_sorted_boxes_float_ptr,
       //                            nto_copy * mask_ld * sizeof(int),
       //                            cudaMemcpyDeviceToHost, device.stream()));
       device.memcpyDeviceToHost(&h_delete_mask[next_offset * mask_ld],
-                           &d_delete_mask[next_offset * mask_ld],
-                           nto_copy * mask_ld * sizeof(int));
+                                &d_delete_mask[next_offset * mask_ld],
+                                nto_copy * mask_ld * sizeof(int));
     }
     // Waiting for previous copy
     CUDA_CHECK(cudaEventSynchronize(copy_done));
@@ -497,11 +952,11 @@ tensorflow::Status nms_gpu_upright(const float* d_desc_sorted_boxes_float_ptr,
 
   const int nkeep = h_keep_sorted_list.size();
   device.memcpyHostToDevice(d_keep_sorted_list, &h_keep_sorted_list[0],
-                  nkeep * sizeof(int));
+                            nkeep * sizeof(int));
 
   *h_nkeep = nkeep;
-  // se::DeviceMemoryBase dev_ptr(dev_delete_mask, N * mask_ld * sizeof(int32));
-  // const bool status =
+  // se::DeviceMemoryBase dev_ptr(dev_delete_mask, N * mask_ld *
+  // sizeof(int32)); const bool status =
   //     stream->ThenMemcpy(host_delete_mask, dev_ptr, N * mask_ld *
   //     sizeof(int32))
   //         .ok();
@@ -536,7 +991,8 @@ tensorflow::Status nms_gpu_upright(const float* d_desc_sorted_boxes_float_ptr,
   //   }
   //   *h_nkeep = h_keep_sorted_list.size();
   //   se::DeviceMemoryBase dev_ptr(d_keep_sorted_list,
-  //                                h_keep_sorted_list.size() * sizeof(int32));
+  //                                h_keep_sorted_list.size() *
+  //                                sizeof(int32));
   //   const bool status = stream
   //                           ->ThenMemcpy(dev_ptr, &h_keep_sorted_list[0],
   //                                        *h_nkeep * sizeof(int32))
@@ -554,6 +1010,82 @@ tensorflow::Status nms_gpu_upright(const float* d_desc_sorted_boxes_float_ptr,
   // cudaMemcpyAsync(d_keep_sorted_list, &h_keep_sorted_list[0],
   //                 nkeep * sizeof(int), cudaMemcpyHostToDevice,
   //                 context->cuda_stream());
+  return Status::OK();
+}
+// This kernel should execute in thenexecute otherwise memcpy and
+
+tensorflow::Status nms_gpu_upright_single(
+    const float* d_desc_sorted_boxes_float_ptr, const int N, const float thresh,
+    int* d_keep_sorted_list, int* h_nkeep, int* dev_delete_mask,
+    int* host_delete_mask, OpKernelContext* context) {
+  // Making sure we respect the __align(16)__ we promised to the compiler
+  auto iptr = reinterpret_cast<std::uintptr_t>(d_desc_sorted_boxes_float_ptr);
+  CHECK_EQ((iptr & 15), 0);
+
+  // The next kernel expects squares
+
+  const int mask_ld = (N + NMS_BOXES_PER_THREAD - 1) / NMS_BOXES_PER_THREAD;
+  const Box* d_desc_sorted_boxes =
+      reinterpret_cast<const Box*>(d_desc_sorted_boxes_float_ptr);
+  int* d_delete_mask = dev_delete_mask;
+  auto stream_exec = context->op_device_context()->stream();
+  auto device = context->eigen_gpu_device();
+  // printf("n=%d mask_id=%d\n",N,mask_ld);
+  NMSKernel<<<CAFFE_GET_BLOCKS_2D(N, mask_ld), CAFFE_CUDA_NUM_THREADS_2D, 0,
+              device.stream()>>>(d_desc_sorted_boxes, N, thresh, mask_ld,
+                                 d_delete_mask);
+  int* h_delete_mask = host_delete_mask;
+  CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
+  // Overlapping CPU computes and D2H memcpy
+  // both take about the same time
+  int nto_copy = std::min(NMS_CHUNK_SIZE, N);
+  cudaEvent_t copy_done;
+  cudaEventCreate(&copy_done);
+  device.memcpyDeviceToHost(&h_delete_mask[0], &d_delete_mask[0],
+                            nto_copy * mask_ld * sizeof(int));
+  // CUDA_CHECK(cudaMemcpyAsync(&h_delete_mask[0], &d_delete_mask[0],
+  //                            nto_copy * mask_ld * sizeof(int),
+  //                            cudaMemcpyDeviceToHost, device.stream()));
+  CUDA_CHECK(cudaEventRecord(copy_done, device.stream()));
+  int offset = 0;
+  std::vector<int> h_keep_sorted_list;
+  std::vector<int> rmv(mask_ld, 0);
+  while (offset < N) {
+    const int ncopied = nto_copy;
+    int next_offset = offset + ncopied;
+    nto_copy = std::min(NMS_CHUNK_SIZE, N - next_offset);
+    if (nto_copy > 0) {
+      // CUDA_CHECK(cudaMemcpyAsync(&h_delete_mask[next_offset * mask_ld],
+      //                            &d_delete_mask[next_offset * mask_ld],
+      //                            nto_copy * mask_ld * sizeof(int),
+      //                            cudaMemcpyDeviceToHost, device.stream()));
+      device.memcpyDeviceToHost(&h_delete_mask[next_offset * mask_ld],
+                                &d_delete_mask[next_offset * mask_ld],
+                                nto_copy * mask_ld * sizeof(int));
+    }
+    // Waiting for previous copy
+    CUDA_CHECK(cudaEventSynchronize(copy_done));
+    if (nto_copy > 0) CUDA_CHECK(cudaEventRecord(copy_done, device.stream()));
+    for (int i = offset; i < next_offset; ++i) {
+      int iblock = i / NMS_BOXES_PER_THREAD;
+      int inblock = i % NMS_BOXES_PER_THREAD;
+      if (!(rmv[iblock] & (1 << inblock))) {
+        h_keep_sorted_list.push_back(i);
+        int* p = &h_delete_mask[i * mask_ld];
+        for (int ib = 0; ib < mask_ld; ++ib) {
+          rmv[ib] |= p[ib];
+        }
+      }
+    }
+    offset = next_offset;
+  }
+  cudaEventDestroy(copy_done);
+
+  const int nkeep = h_keep_sorted_list.size();
+  device.memcpyHostToDevice(d_keep_sorted_list, &h_keep_sorted_list[0],
+                            nkeep * sizeof(int));
+
+  *h_nkeep = nkeep;
   return Status::OK();
 }
 
@@ -576,10 +1108,10 @@ __global__ void GeneratePreNMSUprightBoxesKernel(
   int num_images = config.virtual_thread_count.y;
   CUDA_AXIS_KERNEL_LOOP(image_index, config.virtual_thread_count.y, Y) {
     CUDA_AXIS_KERNEL_LOOP(ibox, config.virtual_thread_count.x, X) {
-      // CUDA_2D_KERNEL_LOOP(ibox, nboxes_to_generate, image_index, num_images){
-      // { box_conv_index : # of the same box, but indexed in the scores from
-      // the conv layer, of shape (A,H,W) the num_images dimension was already
-      // removed box_conv_index = a*K + h*W + w
+      // CUDA_2D_KERNEL_LOOP(ibox, nboxes_to_generate, image_index,
+      // num_images){ { box_conv_index : # of the same box, but indexed in the
+      // scores from the conv layer, of shape (A,H,W) the num_images dimension
+      // was already removed box_conv_index = a*K + h*W + w
       const int box_conv_index = d_sorted_scores_keys[image_index * KA + ibox];
 
       // We want to decompose box_conv_index in (h,w,a)
@@ -607,7 +1139,7 @@ __global__ void GeneratePreNMSUprightBoxesKernel(
       // TODO use fast math when possible
 
       // Deltas of shape (N,H,W,A4)
-      int deltas_idx = box_conv_index+image_index*KA;
+      int deltas_idx = box_conv_index + image_index * KA;
       float4 deltas = d_bbox_deltas[deltas_idx];
       float dx = deltas.x;
       float dy = deltas.y;
@@ -686,13 +1218,13 @@ __global__ void GeneratePreNMSUprightBoxesKernelV2(
   const int KA = K * A;
   int nboxes_to_generate = config.virtual_thread_count.x;
   int num_images = config.virtual_thread_count.y;
-  int num_true=0;
+  int num_true = 0;
   CUDA_AXIS_KERNEL_LOOP(image_index, config.virtual_thread_count.y, Y) {
     CUDA_AXIS_KERNEL_LOOP(ibox, config.virtual_thread_count.x, X) {
-      // CUDA_2D_KERNEL_LOOP(ibox, nboxes_to_generate, image_index, num_images){
-      // { box_conv_index : # of the same box, but indexed in the scores from
-      // the conv layer, of shape (A,H,W) the num_images dimension was already
-      // removed box_conv_index = a*K + h*W + w
+      // CUDA_2D_KERNEL_LOOP(ibox, nboxes_to_generate, image_index,
+      // num_images){ { box_conv_index : # of the same box, but indexed in the
+      // scores from the conv layer, of shape (A,H,W) the num_images dimension
+      // was already removed box_conv_index = a*K + h*W + w
       const int box_conv_index = d_sorted_scores_keys[image_index * KA + ibox];
 
       // We want to decompose box_conv_index in (h,w,a)
@@ -718,7 +1250,7 @@ __global__ void GeneratePreNMSUprightBoxesKernelV2(
       // TODO use fast math when possible
 
       // Deltas of shape (N,H,W,A4)
-      int deltas_idx = box_conv_index+image_index*KA;
+      int deltas_idx = box_conv_index + image_index * KA;
       float4 deltas = d_bbox_deltas[deltas_idx];
       float dx = deltas.y;
       float dy = deltas.x;
@@ -776,7 +1308,7 @@ __global__ void GeneratePreNMSUprightBoxesKernelV2(
       const int out_index = image_index * prenms_nboxes + ibox;
       d_boxes_keep_flags[out_index] = keep_box;
       d_out_boxes[out_index] = {x1, y1, x2, y2};
-      //if(keep_box)printf("Has keep box %d\n",image_index);
+      // if(keep_box)printf("Has keep box %d\n",image_index);
       // d_inout_scores size: (num_images,KA)
       if (!keep_box)
         d_inout_scores[image_index * KA + ibox] = FLT_MIN;  // for NMS
@@ -911,45 +1443,7 @@ struct ROIAlignGrad<GPUDevice, T> {
     // clang-format on
   }
 };
-// template <typename T>
-// struct NMSGPUUpright<GPUDevice, T> {
-//   void operator()(const GPUDevice& d, typename TTypes<T, 4>::ConstTensor
-//   boxes,
-//                   const int N, const float treshold) {
-//     Cuda2DLaunchConfig config = GetCuda2DLaunchConfig(
-//         N, (N + GENRPN_BOXES_PER_THREAD - 1) / GENRPN_BOXES_PER_THREAD, d);
-//   }
-// };
 
-// template <typename T>
-// struct GeneratePreNMSUprightBoxes<GPUDevice & d, T> {
-//   void operator()(
-//       const Device& d,
-//       typename TTypes<T, 4>::ConstTensor digits,  // Scores [N, A, H, W]
-//       typename TTypes<T, 4>::ConstTensor
-//           bbox_deltas,  // [N, A*4, H, W] (full, unsorted / sliced)
-//       typename TTypes<T, 2>::ConstTensor
-//           image_shapes,  // (N, 3 ) (h, w, scale) of images
-//       typename TTypes<T, 2>::ConstTensor anchors,  // (A,4)
-//       const T spatial_scale, const int pre_nms_topN, const int post_nms_topN,
-//       const T nms_thresh, const T min_size, const bool
-//       correct_transform_coords, typename TTypes<T, 2>::Tensor rois, typename
-//       TTypes<T, 1>::Tensor roi_probs) {
-//     constexpr int box_dim = 4;
-//     const int K = H * W;
-//     const int conv_layer_nboxes = K * A;
-//     int total_count = boxes.size();
-//     CudaLaunchConfig config = GetCudaLaunchConfig(total_count, d);
-//     SetZero<<<config.block_count, config.thread_per_block, 0, d.stream()>>>(
-//         config.virtual_thread_count, boxes.data());
-//     total_count = boxes_keep_flags.size();
-//     CudaLaunchConfig config = GetCudaLaunchConfig(total_count, d);
-//     SetZero<<<config.block_count, config.thread_per_block, 0, d.stream()>>>(
-//         config.virtual_thread_count, boxes_keep_flags.data());
-//     Cuda2DLaunchConfig config2d = GetCuda2DLaunchConfig(
-//         pre_nms_nboxes, num_images, d) GeneratePreNMSUprightBoxes
-//   }
-// };
 }  // namespace functor
 
 Status AllocateGenerationTempTensors(
@@ -1041,6 +1535,329 @@ Status AllocatePreNMSTempTensors(
   return Status::OK();
 }
 namespace sami {
+
+class ROIAlignOpV2 : public tensorflow::OpKernel {
+ public:
+  explicit ROIAlignOpV2(tensorflow::OpKernelConstruction* context)
+      : OpKernel(context) {
+    OP_REQUIRES_OK(context, context->GetAttr("spatial_scale", &spatial_scale_));
+    OP_REQUIRES_OK(context, context->GetAttr("pooled_height", &pooled_height_));
+    OP_REQUIRES_OK(context, context->GetAttr("pooled_width", &pooled_width_));
+    OP_REQUIRES_OK(context, context->GetAttr("min_level", &min_level_));
+    OP_REQUIRES_OK(context, context->GetAttr("max_level", &max_level_));
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("canonical_scale", &canonical_scale_));
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("canonical_level", &canonical_level_));
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("sampling_ratio", &sampling_ratio_));
+    is_nhwc_ = false;
+    CHECK_GT(spatial_scale_, 0);
+    CHECK_GT(pooled_height_, 0);
+    CHECK_GT(pooled_width_, 0);
+    CHECK_GE(sampling_ratio_, 0);
+  }
+
+  void Compute(tensorflow::OpKernelContext* context) override {
+    const auto X = context->input(0);
+    const auto RoIs = context->input(1);
+    TensorShape output_shape;
+    Tensor* Y = nullptr;
+    int64 RoIDim0 = RoIs.dim_size(1);
+    const int64 batch = X.dim_size(0);
+    const int64 num_levels = X.dim_size(1);
+    const int64 channels = X.dim_size(2);
+    const int64 height = X.dim_size(3);
+    const int64 width = X.dim_size(4);
+    const int64 roi_cols = RoIs.dim_size(2);  // should be 4
+    const int64 n_rois = RoIs.dim_size(1);    // num_rois,
+    std::vector<int64> shape = {batch, n_rois, channels, pooled_height_,
+                                pooled_width_};  // N,K,C,H,W
+    OP_REQUIRES_OK(context, TensorShapeUtils::MakeShape(shape, &output_shape));
+    OP_REQUIRES_OK(context, context->allocate_output(0, output_shape, &Y));
+    if (RoIs.NumElements() == 0) {
+      return;
+    }
+
+    const int64 total_count = Y->NumElements();
+    if (total_count == 0) return;
+
+    const GPUDevice& d = context->eigen_device<GPUDevice>();
+    Tensor levels;
+    Tensor scaled_boxes;
+    // Tensor* sorted_levels = nullptr;
+    // Tensor* sorted_boxes = nullptr;
+    VLOG(0) << " RoIs.shape=" << RoIs.shape().DebugString();
+    OP_REQUIRES_OK(context, context->allocate_temp(RoIs.dtype(), RoIs.shape(),
+                                                   &scaled_boxes));
+    OP_REQUIRES_OK(context, context->allocate_temp(
+                                DataType::DT_INT32,
+                                TensorShape({batch, n_rois, 1}), &levels));
+    // OP_REQUIRES_OK(context, context->allocate_temp(RoIs.dtype(),
+    // RoIs.shape(),
+    //                                                sorted_boxes));
+    // OP_REQUIRES_OK(
+    //     context,
+    //     context->allocate_temp(DataType::DT_INT32,
+    //                            TensorShape({batch, n_rois, 1}),
+    //                            sorted_levels));
+
+    CudaLaunchConfig config1D = GetCudaLaunchConfig(batch * n_rois, d);
+    VLOG(0) << "Before boxes cudaconfig numelts= "
+            << config1D.virtual_thread_count << " " << name();
+    Boxes2ScaledBoxesAndLevels<float>
+        <<<config1D.block_count, config1D.thread_per_block, 0, d.stream()>>>(
+            config1D, RoIs.flat<float>().data(), min_level_, max_level_,
+            canonical_scale_, canonical_level_, (levels).flat<int32>().data(),
+            (scaled_boxes).flat<float>().data(), false);
+    //d.synchronize();
+    VLOG(0) << "after boxes scaled_shape" << scaled_boxes.shape()
+            << " levels.shape" << levels.shape() << " input shape "
+            << X.shape();
+    //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
+
+    // auto cuda_stream = GetCudaStream(context);
+    // size_t cub_sort_temp_storage_bytes = 0;
+    // float4* f4_ptr = nullptr;
+    // int32* int_ptr = nullptr;
+    // cudaError_t cuda_ret = cub::DeviceRadixSort::SortPairs(
+    //     nullptr, cub_sort_temp_storage_bytes, int_ptr, int_ptr,f4_ptr,f4_ptr,
+    //     RoIs.NumElements(), 0, 6, cuda_stream);
+    // CHECK_EQ(cuda_ret, 0);
+    // Tensor* cub_temp_storage_tensor = nullptr;
+    // OP_REQUIRES_OK(context, context->allocate_temp(
+    //                             DataType::DT_INT8,
+    //                             TensorShape({(int32)cub_sort_temp_storage_bytes}),
+    //                             cub_temp_storage_tensor));
+    // cuda_ret = cub::DeviceRadixSort::SortPairs(
+    //     (*cub_temp_storage_tensor).flat<int8>().data(),
+    //     cub_sort_temp_storage_bytes, (*levels).flat<int32>().data(),
+    //     (*sorted_levels).flat<int32>().data(),
+    //     (float4*)(*scaled_boxes).flat<float>().data(),(float4*)(*sorted_boxes).flat<float>().data(),
+    //     RoIs.NumElements(), 0, 6, cuda_stream);
+    // CHECK_EQ(cuda_ret, 0);
+    Cuda2DLaunchConfig config = GetCuda2DLaunchConfig(
+        n_rois * channels * pooled_height_ * pooled_width_, batch, d);
+    VLOG(0) << "before RoiAlign forward " << name() << " X " << X.shape()
+            << " boxes= " << scaled_boxes.shape()
+            << " levels=" << levels.shape() << " output shape=" << Y->shape()
+            << " block ( " << config.block_count.x << ","
+            << config.block_count.y << "," << config.block_count.z << " ) "
+            << " thread ( " << config.thread_per_block.x << ","
+            << config.thread_per_block.y << "," << config.thread_per_block.z
+            << " )"
+            << " virt ( " << config.virtual_thread_count.x << ","
+            << config.virtual_thread_count.y << ","
+            << config.virtual_thread_count.z << ")";
+    RoIAlignForwardV2<float>
+        <<<config.block_count, config.thread_per_block, 0, d.stream()>>>(
+            config, X.flat<float>().data(), spatial_scale_, num_levels,
+            channels, height, width, n_rois, pooled_height_, pooled_width_,
+            sampling_ratio_, (scaled_boxes).flat<float>().data(),
+            (levels).flat<int32>().data(), roi_cols, (*Y).flat<float>().data());
+    //d.synchronize();
+    VLOG(0) << "after RoiAlign forward, X= " << X.shape().DebugString()
+            << " scaled_boxes=" << scaled_boxes.shape()
+            << " pooled_width=" << pooled_width_ << " output=" << Y->shape();
+    //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
+  }
+
+ private:
+  float spatial_scale_;
+  int pooled_height_;
+  int pooled_width_;
+  int sampling_ratio_;
+  int min_level_;
+  int max_level_;
+  float canonical_scale_;
+  int canonical_level_;
+  bool is_nhwc_;
+};
+
+class ROIAlignOpGradV2 : public tensorflow::OpKernel {
+ public:
+  explicit ROIAlignOpGradV2(tensorflow::OpKernelConstruction* context)
+      : OpKernel(context) {
+    OP_REQUIRES_OK(context, context->GetAttr("spatial_scale", &spatial_scale_));
+    OP_REQUIRES_OK(context, context->GetAttr("pooled_height", &pooled_height_));
+    OP_REQUIRES_OK(context, context->GetAttr("pooled_width", &pooled_width_));
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("sampling_ratio", &sampling_ratio_));
+    OP_REQUIRES_OK(context, context->GetAttr("min_level", &min_level_));
+    OP_REQUIRES_OK(context, context->GetAttr("max_level", &max_level_));
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("canonical_scale", &canonical_scale_));
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("canonical_level", &canonical_level_));
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("sampling_ratio", &sampling_ratio_));
+    is_nhwc_ = false;
+    CHECK_GT(spatial_scale_, 0);
+    CHECK_GT(pooled_height_, 0);
+    CHECK_GT(pooled_width_, 0);
+    CHECK_GE(sampling_ratio_, 0);
+  }
+
+  void Compute(tensorflow::OpKernelContext* context) override {
+    const auto grads = context->input(0);
+    const auto features = context->input(1);
+    const auto RoIs = context->input(2);
+    Tensor* output = nullptr;
+    OP_REQUIRES_OK(context,
+                   context->allocate_output(0, features.shape(), &output));
+    const GPUDevice& d = context->eigen_device<GPUDevice>();
+    const int64 batch = features.dim_size(0);
+    const int64 num_levels = features.dim_size(1);
+    const int64 channels = features.dim_size(2);
+    const int64 height = features.dim_size(3);
+    const int64 width = features.dim_size(4);
+    const int64 roi_cols = RoIs.dim_size(2);
+    const int64 n_rois = RoIs.dim_size(1);
+    Tensor levels;
+    Tensor scaled_boxes;
+    OP_REQUIRES_OK(context, context->allocate_temp(RoIs.dtype(), RoIs.shape(),
+                                                   &scaled_boxes));
+    OP_REQUIRES_OK(context, context->allocate_temp(
+                                DataType::DT_INT32,
+                                TensorShape({batch, n_rois, 1}), &levels));
+    CudaLaunchConfig config1D = GetCudaLaunchConfig(batch * n_rois, d);
+    VLOG(0) << "Before boxes cudaconfig numelts= "
+            << config1D.virtual_thread_count << " " << name();
+    Boxes2ScaledBoxesAndLevels<float>
+        <<<config1D.block_count, config1D.thread_per_block, 0, d.stream()>>>(
+            config1D, RoIs.flat<float>().data(), min_level_, max_level_,
+            canonical_scale_, canonical_level_, (levels).flat<int32>().data(),
+            (scaled_boxes).flat<float>().data(), true);
+    //d.synchronize();
+    VLOG(0) << "after boxes scaled_shape" << scaled_boxes.shape()
+            << " levels.shape" << levels.shape();
+    //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
+
+    Cuda2DLaunchConfig config = GetCuda2DLaunchConfig(
+        n_rois * channels * pooled_height_ * pooled_width_, batch, d);
+    VLOG(0) << "before RoiAlign Backward " << name()
+            << " grads=" << grads.shape() << " features=" << features.shape()
+            << " RoIs" << RoIs.shape() << " block ( " << config.block_count.x
+            << "," << config.block_count.y << "," << config.block_count.z
+            << " ) "
+            << " thread ( " << config.thread_per_block.x << ","
+            << config.thread_per_block.y << "," << config.thread_per_block.z
+            << " )"
+            << " virt ( " << config.virtual_thread_count.x << ","
+            << config.virtual_thread_count.y << ","
+            << config.virtual_thread_count.z << ")";
+
+    RoIAlignBackwardFeatureV2<float>
+        <<<config.block_count, config.thread_per_block, 0, d.stream()>>>(
+            config, grads.flat<float>().data(), spatial_scale_, num_levels,
+            channels, height, width, n_rois, pooled_height_, pooled_width_,
+            sampling_ratio_, roi_cols, (scaled_boxes).flat<float>().data(),
+            (levels).flat<int32>().data(), (*output).flat<float>().data());
+    //d.synchronize();
+    VLOG(0) << "after RoiAlign Backward, X.shape() "
+            << features.shape().DebugString()
+            << " scaled_boxes=" << scaled_boxes.shape()
+            << " pooled_width=" << pooled_width_
+            << "output shape=" << output->shape();
+    //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
+  }
+
+ private:
+  float spatial_scale_;
+  int pooled_height_;
+  int pooled_width_;
+  int sampling_ratio_;
+  int min_level_;
+  int max_level_;
+  float canonical_scale_;
+  int canonical_level_;
+  bool is_nhwc_;
+};
+
+class BoxEncode : public tensorflow::OpKernel {
+ public:
+  explicit BoxEncode(tensorflow::OpKernelConstruction* context)
+      : OpKernel(context) {
+    OP_REQUIRES_OK(context, context->GetAttr("weight_x", &weight_x_));
+    OP_REQUIRES_OK(context, context->GetAttr("weight_y", &weight_y_));
+    OP_REQUIRES_OK(context, context->GetAttr("weight_h", &weight_h_));
+    OP_REQUIRES_OK(context, context->GetAttr("weight_w", &weight_w_));
+  }
+
+  void Compute(tensorflow::OpKernelContext* context) override {
+    const auto boxes = context->input(0);
+    const auto ground_truth = context->input(1);
+    const auto labels = context->input(2);
+    Tensor* output = nullptr;
+    const int64 batch = boxes.dim_size(0);
+    const int64 num_boxes = boxes.dim_size(1);
+    OP_REQUIRES_OK(context,
+                   context->allocate_output(0, boxes.shape(), &output));
+    if (boxes.NumElements() == 0) {
+      return;
+    }
+    const GPUDevice& d = context->eigen_device<GPUDevice>();
+    CudaLaunchConfig config1D = GetCudaLaunchConfig(batch * num_boxes, d);
+    VLOG(1) << "Before encode_boxes= " << config1D.virtual_thread_count << " "
+            << name();
+    box_encode_kernel<<<config1D.block_count, config1D.thread_per_block, 0,
+                        d.stream()>>>(
+        config1D, (float4*)boxes.flat<float>().data(),
+        (float4*)ground_truth.flat<float>().data(), weight_x_, weight_y_,
+        weight_w_, weight_h_, labels.flat<float>().data(),
+        (float4*)(*output).flat<float>().data());
+    //d.synchronize();
+    VLOG(1) << "after encode_boxes " << name();
+    //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
+  }
+
+ private:
+  float weight_x_;
+  float weight_y_;
+  float weight_w_;
+  float weight_h_;
+};
+
+class BoxIntersectionOverUnion : public tensorflow::OpKernel {
+ public:
+  explicit BoxIntersectionOverUnion(tensorflow::OpKernelConstruction* context)
+      : OpKernel(context) {}
+
+  void Compute(tensorflow::OpKernelContext* context) override {
+    const auto boxes = context->input(0);
+    const auto ground_truth = context->input(1);
+    Tensor* output = nullptr;
+    const int64 batch = boxes.dim_size(0);
+    const int64 num_boxes = boxes.dim_size(1);
+    const int64 num_gt = ground_truth.dim_size(1);
+    OP_REQUIRES_OK(context,
+                   context->allocate_output(
+                       0, TensorShape({batch, num_boxes, num_gt}), &output));
+    if (boxes.NumElements() == 0) {
+      return;
+    }
+    const GPUDevice& d = context->eigen_device<GPUDevice>();
+    Cuda2DLaunchConfig config =
+        GetCuda2DLaunchConfig(num_boxes * num_gt, batch, d);
+    VLOG(1) << "Before encode_boxes= " << config.virtual_thread_count.x << " "<< config.virtual_thread_count.y<<" "
+            << name();
+    box_iou_kernel<<<config.block_count, config.thread_per_block, 0,
+                     d.stream()>>>(config, (float4*)boxes.flat<float>().data(),
+                                   (float4*)ground_truth.flat<float>().data(),
+                                   num_boxes, num_gt,
+                                   (*output).flat<float>().data());
+    //d.synchronize();
+    VLOG(1) << "after encode_boxes " << name();
+    //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
+  }
+
+ private:
+  float weight_x_;
+  float weight_y_;
+  float weight_w_;
+  float weight_h_;
+};
+
 // This implemantation is a pytorch compatible implementation and is not good
 // for tensorflow. Synchronizations will cause this op to show up as consuming
 // more resources than it actually is in profiling. This either should be split
@@ -1105,8 +1922,9 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
     // get the size of select temp buffer
     size_t cub_select_temp_storage_bytes = 0;
     char* char_ptr = nullptr;
-    cub::DeviceSelect::Flagged(nullptr, cub_select_temp_storage_bytes, flt_ptr,
-                               char_ptr, flt_ptr, int_ptr, K * A, cuda_stream);
+    float4* f4_ptr = nullptr;
+    cub::DeviceSelect::Flagged(nullptr, cub_select_temp_storage_bytes, f4_ptr,
+                               char_ptr, f4_ptr, int_ptr, K * A, cuda_stream);
     Tensor d_conv_layer_indexes;
     Tensor d_image_offset;
     Tensor d_cub_sort_buffer;
@@ -1323,8 +2141,8 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
     const auto A = scores.dim_size(3);
     const auto H = scores.dim_size(1);
     const auto W = scores.dim_size(2);
-    const auto box_dim = anchors.dim_size(2)/A;
-    CHECK_EQ(box_dim,4);
+    const auto box_dim = anchors.dim_size(2) / A;
+    CHECK_EQ(box_dim, 4);
     // TODO(skama): make sure that inputs are ok.
     const int K = H * W;
     // VLOG(0)<<"num_images="<<num_images<<" A="<<A<<" H="<<H<<" W="<<W;
@@ -1336,19 +2154,20 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
     size_t cub_sort_temp_storage_bytes = 0;
     float* flt_ptr = nullptr;
     int* int_ptr = nullptr;
-    cudaError_t cuda_ret= cub::DeviceSegmentedRadixSort::SortPairsDescending(
+    cudaError_t cuda_ret = cub::DeviceSegmentedRadixSort::SortPairsDescending(
         nullptr, cub_sort_temp_storage_bytes, flt_ptr, flt_ptr, int_ptr,
         int_ptr, num_images * conv_layer_nboxes, num_images, int_ptr, int_ptr,
         0, 8 * sizeof(float),  // sort all bits
         cuda_stream);
-    CHECK_EQ(cuda_ret,CUDA_SUCCESS);
+    CHECK_EQ(cuda_ret, CUDA_SUCCESS);
     // get the size of select temp buffer
     size_t cub_select_temp_storage_bytes = 0;
     char* char_ptr = nullptr;
     float4* f4_ptr = nullptr;
-    cuda_ret=cub::DeviceSelect::Flagged(nullptr, cub_select_temp_storage_bytes, f4_ptr,
-                               char_ptr, f4_ptr, int_ptr, K * A , cuda_stream);
-    CHECK_EQ(cuda_ret,CUDA_SUCCESS);
+    cuda_ret = cub::DeviceSelect::Flagged(
+        nullptr, cub_select_temp_storage_bytes, f4_ptr, char_ptr, f4_ptr,
+        int_ptr, K * A, cuda_stream);
+    CHECK_EQ(cuda_ret, CUDA_SUCCESS);
     Tensor d_conv_layer_indexes;
     Tensor d_image_offset;
     Tensor d_cub_sort_buffer;
@@ -1374,7 +2193,7 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
                            d.stream()>>>(
         conf2d, d_image_offset.flat<int>().data(),
         d_conv_layer_indexes.flat<int>().data());
-    cuda_ret=cub::DeviceSegmentedRadixSort::SortPairsDescending(
+    cuda_ret = cub::DeviceSegmentedRadixSort::SortPairsDescending(
         d_cub_sort_buffer.flat<int8>().data(), cub_sort_temp_storage_bytes,
         scores.flat<float>().data(), dev_sorted_scores.flat<float>().data(),
         d_conv_layer_indexes.flat<int>().data(),
@@ -1385,7 +2204,7 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
         8 * sizeof(float),  // sort all bits
         cuda_stream);
     // Keeping only the topN pre_nms
-    CHECK_EQ(cuda_ret,CUDA_SUCCESS);
+    CHECK_EQ(cuda_ret, CUDA_SUCCESS);
     conf2d = GetCuda2DLaunchConfig(nboxes_to_generate, num_images, d);
     GeneratePreNMSUprightBoxesKernelV2<<<
         conf2d.block_count, conf2d.thread_per_block, 0, d.stream()>>>(
@@ -1397,7 +2216,7 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
         reinterpret_cast<float4*>(dev_boxes.flat<float>().data()),
         nboxes_to_generate, dev_sorted_scores.flat<float>().data(),
         (char*)dev_boxes_keep_flags.flat<int8>().data());
-    CHECK_EQ(cudaGetLastError(),CUDA_SUCCESS);
+    CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
     const int nboxes_generated = nboxes_to_generate;
     const int roi_cols = box_dim;
     const int max_postnms_nboxes = std::min(nboxes_generated, post_nms_topn_);
@@ -1463,33 +2282,34 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
 
       // Moving valid boxes (ie the ones with d_boxes_keep_flags[ibox] == true)
       // to the output tensors
-      //printf("Host before flagged boxes=%d ngen=%d\n",h_prenms_nboxes,nboxes_generated);
-      cuda_ret=cub::DeviceSelect::Flagged(
+      // printf("Host before flagged boxes=%d
+      // ngen=%d\n",h_prenms_nboxes,nboxes_generated);
+      cuda_ret = cub::DeviceSelect::Flagged(
           d_cub_select_temp_storage, cub_select_temp_storage_bytes,
           reinterpret_cast<const float4*>(d_image_boxes),
           d_image_boxes_keep_flags,
           reinterpret_cast<float4*>(d_image_prenms_boxes), d_prenms_nboxes,
           nboxes_generated, d.stream());
-      CHECK_EQ(cuda_ret,CUDA_SUCCESS);
-      cuda_ret=cub::DeviceSelect::Flagged(
+      CHECK_EQ(cuda_ret, CUDA_SUCCESS);
+      cuda_ret = cub::DeviceSelect::Flagged(
           d_cub_select_temp_storage, cub_select_temp_storage_bytes,
           d_image_sorted_scores, d_image_boxes_keep_flags,
           d_image_prenms_scores, d_prenms_nboxes, nboxes_generated, d.stream());
-      CHECK_EQ(cuda_ret,CUDA_SUCCESS);
+      CHECK_EQ(cuda_ret, CUDA_SUCCESS);
       d.memcpyDeviceToHost(&h_prenms_nboxes, d_prenms_nboxes, sizeof(int));
       d.synchronize();
 
       // We know prenms_boxes <= topN_prenms, because nboxes_generated <=
       // topN_prenms. Calling NMS on the generated boxes
       const int prenms_nboxes = h_prenms_nboxes;
-      //printf("Host boxes=%d ngen=%d\n",h_prenms_nboxes,nboxes_generated);
+      // printf("Host boxes=%d ngen=%d\n",h_prenms_nboxes,nboxes_generated);
       int nkeep;
-      //printf("Before nms\n");
+      // printf("Before nms\n");
       nms_gpu_upright(d_image_prenms_boxes, prenms_nboxes, nms_threshold_,
                       d_image_boxes_keep_list, &nkeep, d_nms_mask, h_nms_mask,
                       context);
-      CHECK_EQ(cudaGetLastError(),CUDA_SUCCESS);
-      //printf("After nms nkeep=%d\n",nkeep);
+      CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
+      // printf("After nms nkeep=%d\n",nkeep);
       // All operations done after previous sort were keeping the relative order
       // of the elements the elements are still sorted keep topN <=> truncate
       // the array
@@ -1504,7 +2324,7 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
           d_image_prenms_scores, d_image_boxes_keep_list, postnms_nboxes,
           d_image_postnms_rois, d_image_postnms_rois_probs);
       nrois_in_output += postnms_nboxes;
-      CHECK_EQ(cudaGetLastError(),CUDA_SUCCESS);
+      CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
     }
     // Tensor* output_rois = nullptr;
     // Tensor* output_roi_probs = nullptr;
@@ -1556,11 +2376,23 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
 }  // namespace sami
 template struct functor::ROIAlignGrad<GPUDevice, float>;
 template struct functor::ROIAlign<GPUDevice, float>;
+// template struct functor::ROIAlignGradV2<GPUDevice, float>;
+// template struct functor::ROIAlignV2<GPUDevice, float>;
 REGISTER_KERNEL_BUILDER(
     Name("GenerateBoundingBoxProposals").Device(tensorflow::DEVICE_GPU),
     tensorflow::sami::GenerateBoundingBoxProposals)
 REGISTER_KERNEL_BUILDER(
     Name("GenerateBoundingBoxProposalsV2").Device(tensorflow::DEVICE_GPU),
     tensorflow::sami::GenerateBoundingBoxProposalsV2)
+REGISTER_KERNEL_BUILDER(Name("ROIAlignV2").Device(tensorflow::DEVICE_GPU),
+                        tensorflow::sami::ROIAlignOpV2);
+REGISTER_KERNEL_BUILDER(Name("ROIAlignV2Grad").Device(tensorflow::DEVICE_GPU),
+                        tensorflow::sami::ROIAlignOpGradV2);
+REGISTER_KERNEL_BUILDER(Name("BoxEncode").Device(tensorflow::DEVICE_GPU),
+                        tensorflow::sami::BoxEncode);
+REGISTER_KERNEL_BUILDER(Name("BoxIntersectionOverUnion").Device(tensorflow::DEVICE_GPU),
+                        tensorflow::sami::BoxIntersectionOverUnion);
+
+
 }  // namespace tensorflow
 #endif

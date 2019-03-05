@@ -42,6 +42,25 @@ struct ROIAlignGrad {
                   typename TTypes<T, 4>::Tensor output);
 };
 
+// template <typename Device, typename T>
+// struct ROIAlignV2 {
+//   void operator()(const Device& d, typename TTypes<T, 4>::ConstTensor X,
+//                   typename TTypes<T, 3>::ConstTensor RoIs,
+//                   const int pooled_height, const int pooled_width,
+//                   const int samplig_ratio, const T spatial_scale,
+//                   typename TTypes<T, 5>::Tensor Y);
+// };
+
+// template <typename Device, typename T>
+// struct ROIAlignGradV2 {
+//   void operator()(const Device& d, typename TTypes<T, 5>::ConstTensor grads,
+//                   typename TTypes<T, 4>::ConstTensor inputs,
+//                   typename TTypes<T, 3>::ConstTensor rois,
+//                   const int pooled_height, const int pooled_width,
+//                   const int sampling_ratio, const T spatial_scale,
+//                   typename TTypes<T, 4>::Tensor output);
+// };
+
 // ignore for now
 template <typename Device, typename T>
 struct NMSGPUUpright {
