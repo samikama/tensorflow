@@ -79,6 +79,7 @@ REGISTER_OP("ROIAlignV2")
     .Attr("max_level: int = 5")
     .Attr("canonical_scale: float = 224.0")
     .Attr("canonical_level: int = 4")
+    .Attr("debug: bool = false")
     .SetShapeFn([](InferenceContext* c) -> Status {
       // 5D feature inputs [N,L,C,H,W]
       ShapeHandle features;
@@ -115,6 +116,7 @@ REGISTER_OP("ROIAlignV2Grad")
     .Attr("max_level: int = 5")
     .Attr("canonical_scale: float = 224.0")
     .Attr("canonical_level: int = 4")
+    .Attr("debug: bool = false")
     .SetShapeFn([](InferenceContext* c) -> Status {
       c->set_output(0, c->input(1));
       return Status::OK();

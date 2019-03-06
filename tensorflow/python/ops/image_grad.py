@@ -187,6 +187,7 @@ def _ROIAlignV2Grad(op, grad):
         max_level=op.get_attr("max_level"),
         canonical_scale=op.get_attr("canonical_scale"),
         canonical_level=op.get_attr("canonical_level"),
+        debug=op.get_attr("debug"),
         )
     # pylint: enable=protected-access
   else:

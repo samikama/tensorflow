@@ -49,7 +49,7 @@ template <typename T>
 EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE T bilinear_interpolate(
     const T* bottom_data, const int height, const int width, T y, T x,
     const int index, /* index for debug only*/ const T* lower_bound = nullptr,
-    const T* upper_bound = nullptr, int chann = -1) {
+    const T* upper_bound = nullptr, int chann = -1,bool debug=false) {
   // deal with cases that inverse elements are out of feature map boundary
   if (y < -1.0 || y > height || x < -1.0 || x > width) {
     // empty
@@ -85,22 +85,15 @@ EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE T bilinear_interpolate(
   T v2 = bottom_data[y_low * width + x_high];
   T v3 = bottom_data[y_high * width + x_low];
   T v4 = bottom_data[y_high * width + x_high];
-  if (lower_bound && upper_bound &&
-      (bottom_data + (y_low * width + x_low) < lower_bound) &&
-      (bottom_data + (y_high * width + x_high) > upper_bound)) {
-    printf("index=%d min=%p max=%p upper=%p lower=%p\n",
-           (bottom_data + (y_low * width + x_low)),
-           (bottom_data + (y_high * width + x_high)), upper_bound, lower_bound);
-  }
-  if (chann >= 0 && chann < 4) {
-    int diff = bottom_data - lower_bound;
-    printf(
-        " BI y=%f x=%f yl=%d yh=%d xl=%d xh=%d w=%d h=%d c=%d index=%d "
-        "offset%d %d %d %d\n",
-        y, x, y_low, y_high, x_low, x_high, width, height, chann, index,
-        diff + y_low * width + x_low, diff + y_low * width + x_high,
-        diff + y_high * width + x_low, diff + y_high * width + x_high);
-  }
+  // if (debug && chann >= 0 && chann < 4) {
+  //   int diff = bottom_data - lower_bound;
+  //   printf(
+  //       " BI y=%f x=%f yl=%d yh=%d xl=%d xh=%d w=%d h=%d lx=%f ly=%f v1=%f v2=%f v3=%f v4=%f c=%d index=%d "
+  //       "offset%d %d %d %d\n",
+  //       y, x, y_low, y_high, x_low, x_high, width, height, lx,ly, v1,v2,v3,v4 ,chann, index,
+  //       diff + y_low * width + x_low, diff + y_low * width + x_high,
+  //       diff + y_high * width + x_low, diff + y_high * width + x_high);
+  // }
   T w1 = hy * hx, w2 = hy * lx, w3 = ly * hx, w4 = ly * lx;
 
   T val = (w1 * v1 + w2 * v2 + w3 * v3 + w4 * v4);
@@ -113,7 +106,7 @@ EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC void bilinear_interpolate_gradient(
     const int height, const int width, T y, T x, T& w1, T& w2, T& w3, T& w4,
     int& x_low, int& x_high, int& y_low, int& y_high,
     const int index /* index for debug only*/, const int level = -1,
-    int chann = -1) {
+    int chann = -1, bool debug=false) {
   // deal with cases that inverse elements are out of feature map boundary
   if (y < -1.0 || y > height || x < -1.0 || x > width) {
     // empty
@@ -152,12 +145,12 @@ EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC void bilinear_interpolate_gradient(
   // T v3 = bottom_data[y_high * width + x_low];
   // T v4 = bottom_data[y_high * width + x_high];
   // T val = (w1 * v1 + w2 * v2 + w3 * v3 + w4 * v4);
-  if (chann >= 0 and chann < 4)
-    printf(
-        "BIG y=%f x=%f yl=%d yh=%d xl=%d xh=%d w=%d h=%d hx=%f hy=%f lx=%f "
-        "ly=%f level=%d index=%d\n",
-        y, x, y_low, y_high, x_low, x_high, width, height, hx, hy, lx, ly,
-        level, index);
+  // if (debug && chann >= 0 && chann < 4)
+  //   printf(
+  //       "BIG y=%f x=%f yl=%d yh=%d xl=%d xh=%d w=%d h=%d hx=%f hy=%f lx=%f "
+  //       "ly=%f level=%d index=%d\n",
+  //       y, x, y_low, y_high, x_low, x_high, width, height, hx, hy, lx, ly,
+  //       level, index);
 
   w1 = hy * hx, w2 = hy * lx, w3 = ly * hx, w4 = ly * lx;
 
@@ -308,7 +301,7 @@ __global__ void box_encode_kernel(CudaLaunchConfig config, const float4* boxes,
                                   float4* output) {
   CUDA_1D_KERNEL_LOOP(i, config.virtual_thread_count) {
     float4& out = output[i];
-    if (labels[i] > 0) {
+    if (labels[i] > 0.) {
       const float4& box = boxes[i];
       const float4& anch = anchors[i];
       float bw = box.w - box.y + 1.0;  // layout is [y1,x1,y2,x2]
@@ -414,7 +407,7 @@ __global__ void Boxes2ScaledBoxesAndLevels(const CudaLaunchConfig config,
                                            int max_level, float canonical_scale,
                                            int canonical_level, int* levels,
                                            T* scaled_boxes,
-                                           bool is_bw = false) {
+                                           bool is_bw = false,bool debug=false) {
   CUDA_1D_KERNEL_LOOP(i, config.virtual_thread_count) {
     const T* box = boxes + i * 4;
     T* scaled_box = scaled_boxes + i * 4;
@@ -431,27 +424,22 @@ __global__ void Boxes2ScaledBoxesAndLevels(const CudaLaunchConfig config,
                             __log2f(box_area_sqrt / canonical_scale + 1e-6f)),
                 max_level));
     levels[i] = level - min_level;
-    // if (levels[i] > 10 || levels[i] < -10)
-    //   printf("level=%d min=%d max=%d h=%f w=%f sqa=%f l2=%f floor=%f\n",
-    //   level,
-    //          min_level, max_level, height, width, box_area_sqrt,
-    //          __log2f(box_area_sqrt / canonical_scale + 1e-6f),
-    //          floorf(__log2f(box_area_sqrt / canonical_scale + 1e-6f) +
-    //                 canonical_level));
     T level_scale = 1 << level;
 
-    printf(
-        "BS level=%d scale=%f min=%d max=%d h=%f w=%f sqa=%f l2=%f floor=%f "
-        "i=%d is_bw=%d\n",
-        level, level_scale, min_level, max_level, height, width, box_area_sqrt,
-        __log2f(box_area_sqrt / canonical_scale + 1e-6f),
-        floorf(__log2f(box_area_sqrt / canonical_scale + 1e-6f) +
-               canonical_level),
-        i, is_bw);
     scaled_box[0] = y1 / level_scale;
     scaled_box[1] = x1 / level_scale;
     scaled_box[2] = height / level_scale;
     scaled_box[3] = width / level_scale;
+    // if(debug){
+    // printf(
+    //     "BS level=%d scale=%f min=%d max=%d x1=%f y1=%f x2=%f y2=%f h=%f w=%f sqa=%f l2=%f floor=%f "
+    //     " sx1=%f sy1=%f sh=%f sw=%f i=%d is_bw=%d\n",
+    //     level, level_scale, min_level, max_level,x1,y1,x2,y2, height, width, box_area_sqrt,
+    //     __log2f(box_area_sqrt / canonical_scale + 1e-6f),
+    //     floorf(__log2f(box_area_sqrt / canonical_scale + 1e-6f) +
+    //            canonical_level),
+    //     scaled_box[0],scaled_box[1],scaled_box[2],scaled_box[3],i, is_bw);
+    // }
   }
 }
 
@@ -461,7 +449,7 @@ __global__ void RoIAlignForwardV2(
     const T spatial_scale, const int num_levels, const int channels,
     const int height, const int width, const int n_rois,
     const int pooled_height, const int pooled_width, const int sampling_ratio,
-    const T* scaled_roi_boxes, const int32* levels, int roi_cols, T* top_data) {
+    const T* scaled_roi_boxes, const int32* levels, int roi_cols, T* top_data,bool debug=false) {
   CUDA_AXIS_KERNEL_LOOP(image_index, nthreads.virtual_thread_count.y, Y) {
     CUDA_AXIS_KERNEL_LOOP(index, nthreads.virtual_thread_count.x, X) {
       // CUDA_1D_KERNEL_LOOP(index, nthreads.virtual_thread_count) {
@@ -477,14 +465,6 @@ __global__ void RoIAlignForwardV2(
           scaled_roi_boxes + image_index * n_rois * roi_cols + n * roi_cols;
       T roi_start_w = offset_bottom_rois[1] * spatial_scale;
       T roi_start_h = offset_bottom_rois[0] * spatial_scale;
-      if (image_index * n_rois * roi_cols + n * roi_cols >= 512 * 4)
-        printf("index=%d roi_offset=%d\n", index,
-               image_index * n_rois * roi_cols + n * roi_cols);
-      // Do not using rounding; this implementation detail is critical
-      // T roi_start_w = roundf(offset_bottom_rois[0] * spatial_scale);
-      // T roi_start_h = roundf(offset_bottom_rois[1] * spatial_scale);
-      // T roi_end_w = roundf(offset_bottom_rois[2] * spatial_scale);
-      // T roi_end_h = roundf(offset_bottom_rois[3] * spatial_scale);
 
       // Force malformed ROIs to be 1x1
       T roi_width = Eigen::numext::maxi(offset_bottom_rois[3], (T)1.);
@@ -495,17 +475,6 @@ __global__ void RoIAlignForwardV2(
       const T* offset_bottom_data =
           bottom_data + image_index * height * width * channels * num_levels +
           height * width * channels * level + c * height * width;
-      if (image_index * height * width * channels * num_levels +
-              height * width * channels * level + c * height * width >=
-          5 * 256 * 256 * 256)
-        printf(
-            "index=%d feature_offset=%d im=%d, h=%d w=%d ch=%d nl=%d l=%d "
-            "c=%d "
-            "n=%d\n",
-            index,
-            image_index * height * width * channels * num_levels +
-                height * width * channels * level + c * height * width,
-            image_index, height, width, channels, num_levels, level, c, n);
       // We use roi_bin_grid to sample the grid and mimic integral
       int roi_bin_grid_h = (sampling_ratio > 0)
                                ? sampling_ratio
@@ -529,14 +498,15 @@ __global__ void RoIAlignForwardV2(
           const T x = roi_start_w + pw * bin_size_w +
                       static_cast<T>(ix + .5f) * bin_size_w /
                           static_cast<T>(roi_bin_grid_w);
-          if (c >= 0 && c < 4)
-            printf(
-                "AL im=%d, h=%d w=%d lh=%d lw=%d ch=%d nl=%d l=%d pw=%d "
-                "ph=%d "
-                "c=%d n=%d "
-                "x=%f y=%f index=%d offset=%d\n",
-                image_index, height, width, level_height, level_width, channels,
-                num_levels, level, pw, ph, c, n, x, y, index);
+          // if (debug && c >= 0 && c < 4)
+          //   printf(
+          //       "AL im=%d, h=%d w=%d lh=%d lw=%d ch=%d nl=%d l=%d pw=%d "
+          //       "ph=%d "
+          //       "c=%d n=%d "
+          //       "x=%f y=%f index=%d offset=%d\n",
+          //       image_index, height, width, level_height, level_width, channels,
+          //       num_levels, level, pw, ph, c, n, x, y, index,image_index * height * width * channels * num_levels +
+          // height * width * channels * level + c * height * width);
           T val = bilinear_interpolate(offset_bottom_data, level_height,
                                        level_width, y, x, index, bottom_data,
                                        bottom_data + (5 * 256 * 256 * 256), c);
@@ -547,10 +517,6 @@ __global__ void RoIAlignForwardV2(
 
       top_data[nthreads.virtual_thread_count.x * image_index + index] =
           output_val;
-      if (nthreads.virtual_thread_count.x * image_index + index >=
-          512 * 256 * 7 * 7)
-        printf("index=%d output_offset=%d\n", index,
-               nthreads.virtual_thread_count.x * image_index + index);
     }
   }
 }
@@ -584,10 +550,6 @@ __global__ void RoIAlignBackwardFeature(
     T roi_start_h = offset_bottom_rois[1] * spatial_scale;
     T roi_end_w = offset_bottom_rois[2] * spatial_scale;
     T roi_end_h = offset_bottom_rois[3] * spatial_scale;
-    // T roi_start_w = roundf(offset_bottom_rois[1] * spatial_scale);
-    // T roi_start_h = roundf(offset_bottom_rois[2] * spatial_scale);
-    // T roi_end_w = roundf(offset_bottom_rois[3] * spatial_scale);
-    // T roi_end_h = roundf(offset_bottom_rois[4] * spatial_scale);
 
     // Force malformed ROIs to be 1x1
     T roi_width = Eigen::numext::maxi(roi_end_w - roi_start_w, (T)1.);
@@ -657,7 +619,7 @@ __global__ void RoIAlignBackwardFeatureV2(
     const int pooled_height, const int pooled_width, const int sampling_ratio,
     const int roi_cols, const T* input_rois,
     int32* levels,  // scaled rois,  levels
-    T* output_grads /* input_grad */) {
+    T* output_grads /* input_grad */,bool debug=false) {
   CUDA_AXIS_KERNEL_LOOP(image_index, nthreads.virtual_thread_count.y, Y) {
     CUDA_AXIS_KERNEL_LOOP(index, nthreads.virtual_thread_count.x, X) {
       // CUDA_1D_KERNEL_LOOP(index, nthreads.virtual_thread_count) {
@@ -670,17 +632,9 @@ __global__ void RoIAlignBackwardFeatureV2(
       // but caffe2 implementation gradient assumes 5 columns
       const T* offset_input_rois =
           input_rois + image_index * n_rois * roi_cols + n * roi_cols;
-      if (image_index * n_rois * roi_cols + n * roi_cols >= 512 * 4)
-        printf("index=%d roi_offset=%d\n", index,
-               image_index * n_rois * roi_cols + n * roi_cols);
-
       // Do not using rounding; this implementation detail is critical
       T roi_start_w = offset_input_rois[1] * spatial_scale;
       T roi_start_h = offset_input_rois[0] * spatial_scale;
-      // T roi_start_w = roundf(offset_input_rois[1] * spatial_scale);
-      // T roi_start_h = roundf(offset_input_rois[2] * spatial_scale);
-      // T roi_end_w = roundf(offset_input_rois[3] * spatial_scale);
-      // T roi_end_h = roundf(offset_input_rois[4] * spatial_scale);
 
       // Force malformed ROIs to be 1x1
       T roi_width = Eigen::numext::maxi(offset_input_rois[3], (T)1.);
@@ -691,19 +645,18 @@ __global__ void RoIAlignBackwardFeatureV2(
       T* offset_output_grads =
           output_grads + image_index * height * width * channels * num_levels +
           height * width * channels * level + c * height * width;
-      // image_index*(pooled_height*pooled_width*channels*num_rois)+(n*channels*pooled_height*pooled_width)+(c*pooled_height*pooled_width);
       int inp_grad_offset =
           (image_index * n_rois * channels + n * channels + c) * pooled_height *
           pooled_width;
       const T* offset_inp_grads = inp_grads + inp_grad_offset;
       const T inp_grads_this_bin = offset_inp_grads[ph * pooled_width + pw];
-      if (isnan(inp_grads_this_bin)) {
-        printf(
-            "seen nan in grads index=%d feature_offset=%d im=%d, h=%d w=%d "
-            "ch=%d nl=%d l=%d c=%d n=%d ph=%d pw=%d pooled_width=%d\n",
-            index, inp_grad_offset, image_index, height, width, channels,
-            num_levels, level, c, n, ph, pw, pooled_width);
-      }
+      // if (debug && isnan(inp_grads_this_bin)) {
+      //   printf(
+      //       "seen nan in grads index=%d feature_offset=%d im=%d, h=%d w=%d "
+      //       "ch=%d nl=%d l=%d c=%d n=%d ph=%d pw=%d pooled_width=%d\n",
+      //       index, inp_grad_offset, image_index, height, width, channels,
+      //       num_levels, level, c, n, ph, pw, pooled_width);
+      // }
       // We use roi_bin_grid to sample the grid and mimic integral
       int roi_bin_grid_h = (sampling_ratio > 0)
                                ? sampling_ratio
@@ -732,17 +685,21 @@ __global__ void RoIAlignBackwardFeatureV2(
 
           bilinear_interpolate_gradient(level_height, level_width, y, x, w1, w2,
                                         w3, w4, x_low, x_high, y_low, y_high,
-                                        index, level, c);
+                                        index, level, c,debug);
 
           T g1 = inp_grads_this_bin * w1 / count;
           T g2 = inp_grads_this_bin * w2 / count;
           T g3 = inp_grads_this_bin * w3 / count;
           T g4 = inp_grads_this_bin * w4 / count;
-          if ((isnan(g1) || isnan(g2) || isnan(g3) || isnan(g4)) &&
-              index < 20) {
-            printf("nan in gs g1=%d g2=%d g3=%d g4=%d count=%d\n", g1, g2, g3,
-                   g4, count);
-          }
+          // if(debug){
+          //   printf("ALG im=%d lh=%d lw=%d l=%d pw=%d ph=%d c=%d n=%d x=%f y=%f xl=%d yl=%d xh=%d yh=%d v=%f w1=%f w2=%f w3=%f w4=%f count=%f index=%d\n",
+          //   image_index,level_height,level_width,level,pw,ph,c,n,x,y,x_low,y_low,x_high,y_high,inp_grads_this_bin,w1,w2,w3,w4,count,index);
+          // }
+          // if (debug && (isnan(g1) || isnan(g2) || isnan(g3) || isnan(g4)) &&
+          //     index < 20) {
+          //   printf("nan in gs g1=%d g2=%d g3=%d g4=%d count=%d\n", g1, g2, g3,
+          //          g4, count);
+          // }
           if (x_low >= 0 && x_high >= 0 && y_low >= 0 && y_high >= 0) {
             CudaAtomicAdd(offset_output_grads + y_low * width + x_low,
                           static_cast<T>(g1));
@@ -1551,6 +1508,9 @@ class ROIAlignOpV2 : public tensorflow::OpKernel {
                    context->GetAttr("canonical_level", &canonical_level_));
     OP_REQUIRES_OK(context,
                    context->GetAttr("sampling_ratio", &sampling_ratio_));
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("debug", &debug_));
+
     is_nhwc_ = false;
     CHECK_GT(spatial_scale_, 0);
     CHECK_GT(pooled_height_, 0);
@@ -1585,60 +1545,27 @@ class ROIAlignOpV2 : public tensorflow::OpKernel {
     const GPUDevice& d = context->eigen_device<GPUDevice>();
     Tensor levels;
     Tensor scaled_boxes;
-    // Tensor* sorted_levels = nullptr;
-    // Tensor* sorted_boxes = nullptr;
-    VLOG(0) << " RoIs.shape=" << RoIs.shape().DebugString();
     OP_REQUIRES_OK(context, context->allocate_temp(RoIs.dtype(), RoIs.shape(),
                                                    &scaled_boxes));
     OP_REQUIRES_OK(context, context->allocate_temp(
                                 DataType::DT_INT32,
                                 TensorShape({batch, n_rois, 1}), &levels));
-    // OP_REQUIRES_OK(context, context->allocate_temp(RoIs.dtype(),
-    // RoIs.shape(),
-    //                                                sorted_boxes));
-    // OP_REQUIRES_OK(
-    //     context,
-    //     context->allocate_temp(DataType::DT_INT32,
-    //                            TensorShape({batch, n_rois, 1}),
-    //                            sorted_levels));
-
     CudaLaunchConfig config1D = GetCudaLaunchConfig(batch * n_rois, d);
-    VLOG(0) << "Before boxes cudaconfig numelts= "
-            << config1D.virtual_thread_count << " " << name();
+    VLOG(1) << "Before boxes cudaconfig numelts= "
+            << config1D.virtual_thread_count << " " << name()<<" block "<<config1D.block_count
+            <<" threads="<<config1D.thread_per_block;
     Boxes2ScaledBoxesAndLevels<float>
         <<<config1D.block_count, config1D.thread_per_block, 0, d.stream()>>>(
             config1D, RoIs.flat<float>().data(), min_level_, max_level_,
             canonical_scale_, canonical_level_, (levels).flat<int32>().data(),
-            (scaled_boxes).flat<float>().data(), false);
+            (scaled_boxes).flat<float>().data(), false,debug_);
     //d.synchronize();
-    VLOG(0) << "after boxes scaled_shape" << scaled_boxes.shape()
+    VLOG(1) << "after boxes scaled_shape" << scaled_boxes.shape()
             << " levels.shape" << levels.shape() << " input shape "
             << X.shape();
-    //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
-
-    // auto cuda_stream = GetCudaStream(context);
-    // size_t cub_sort_temp_storage_bytes = 0;
-    // float4* f4_ptr = nullptr;
-    // int32* int_ptr = nullptr;
-    // cudaError_t cuda_ret = cub::DeviceRadixSort::SortPairs(
-    //     nullptr, cub_sort_temp_storage_bytes, int_ptr, int_ptr,f4_ptr,f4_ptr,
-    //     RoIs.NumElements(), 0, 6, cuda_stream);
-    // CHECK_EQ(cuda_ret, 0);
-    // Tensor* cub_temp_storage_tensor = nullptr;
-    // OP_REQUIRES_OK(context, context->allocate_temp(
-    //                             DataType::DT_INT8,
-    //                             TensorShape({(int32)cub_sort_temp_storage_bytes}),
-    //                             cub_temp_storage_tensor));
-    // cuda_ret = cub::DeviceRadixSort::SortPairs(
-    //     (*cub_temp_storage_tensor).flat<int8>().data(),
-    //     cub_sort_temp_storage_bytes, (*levels).flat<int32>().data(),
-    //     (*sorted_levels).flat<int32>().data(),
-    //     (float4*)(*scaled_boxes).flat<float>().data(),(float4*)(*sorted_boxes).flat<float>().data(),
-    //     RoIs.NumElements(), 0, 6, cuda_stream);
-    // CHECK_EQ(cuda_ret, 0);
     Cuda2DLaunchConfig config = GetCuda2DLaunchConfig(
         n_rois * channels * pooled_height_ * pooled_width_, batch, d);
-    VLOG(0) << "before RoiAlign forward " << name() << " X " << X.shape()
+    VLOG(1) << "before RoiAlign forward " << name() << " X " << X.shape()
             << " boxes= " << scaled_boxes.shape()
             << " levels=" << levels.shape() << " output shape=" << Y->shape()
             << " block ( " << config.block_count.x << ","
@@ -1654,9 +1581,9 @@ class ROIAlignOpV2 : public tensorflow::OpKernel {
             config, X.flat<float>().data(), spatial_scale_, num_levels,
             channels, height, width, n_rois, pooled_height_, pooled_width_,
             sampling_ratio_, (scaled_boxes).flat<float>().data(),
-            (levels).flat<int32>().data(), roi_cols, (*Y).flat<float>().data());
+            (levels).flat<int32>().data(), roi_cols, (*Y).flat<float>().data(),debug_);
     //d.synchronize();
-    VLOG(0) << "after RoiAlign forward, X= " << X.shape().DebugString()
+    VLOG(1) << "after RoiAlign forward, X= " << X.shape().DebugString()
             << " scaled_boxes=" << scaled_boxes.shape()
             << " pooled_width=" << pooled_width_ << " output=" << Y->shape();
     //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
@@ -1672,6 +1599,7 @@ class ROIAlignOpV2 : public tensorflow::OpKernel {
   float canonical_scale_;
   int canonical_level_;
   bool is_nhwc_;
+  bool debug_;
 };
 
 class ROIAlignOpGradV2 : public tensorflow::OpKernel {
@@ -1691,6 +1619,8 @@ class ROIAlignOpGradV2 : public tensorflow::OpKernel {
                    context->GetAttr("canonical_level", &canonical_level_));
     OP_REQUIRES_OK(context,
                    context->GetAttr("sampling_ratio", &sampling_ratio_));
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("debug", &debug_));
     is_nhwc_ = false;
     CHECK_GT(spatial_scale_, 0);
     CHECK_GT(pooled_height_, 0);
@@ -1721,21 +1651,21 @@ class ROIAlignOpGradV2 : public tensorflow::OpKernel {
                                 DataType::DT_INT32,
                                 TensorShape({batch, n_rois, 1}), &levels));
     CudaLaunchConfig config1D = GetCudaLaunchConfig(batch * n_rois, d);
-    VLOG(0) << "Before boxes cudaconfig numelts= "
+    VLOG(1) << "Before boxes cudaconfig numelts= "
             << config1D.virtual_thread_count << " " << name();
     Boxes2ScaledBoxesAndLevels<float>
         <<<config1D.block_count, config1D.thread_per_block, 0, d.stream()>>>(
             config1D, RoIs.flat<float>().data(), min_level_, max_level_,
             canonical_scale_, canonical_level_, (levels).flat<int32>().data(),
-            (scaled_boxes).flat<float>().data(), true);
+            (scaled_boxes).flat<float>().data(), true,debug_);
     //d.synchronize();
-    VLOG(0) << "after boxes scaled_shape" << scaled_boxes.shape()
+    VLOG(1) << "after boxes scaled_shape" << scaled_boxes.shape()
             << " levels.shape" << levels.shape();
     //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
 
     Cuda2DLaunchConfig config = GetCuda2DLaunchConfig(
         n_rois * channels * pooled_height_ * pooled_width_, batch, d);
-    VLOG(0) << "before RoiAlign Backward " << name()
+    VLOG(1) << "before RoiAlign Backward " << name()
             << " grads=" << grads.shape() << " features=" << features.shape()
             << " RoIs" << RoIs.shape() << " block ( " << config.block_count.x
             << "," << config.block_count.y << "," << config.block_count.z
@@ -1746,15 +1676,18 @@ class ROIAlignOpGradV2 : public tensorflow::OpKernel {
             << " virt ( " << config.virtual_thread_count.x << ","
             << config.virtual_thread_count.y << ","
             << config.virtual_thread_count.z << ")";
+    CudaLaunchConfig zconfig = GetCudaLaunchConfig(output->NumElements(), d);
+    SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+        zconfig.virtual_thread_count, (*output).flat<float>().data());
 
     RoIAlignBackwardFeatureV2<float>
         <<<config.block_count, config.thread_per_block, 0, d.stream()>>>(
             config, grads.flat<float>().data(), spatial_scale_, num_levels,
             channels, height, width, n_rois, pooled_height_, pooled_width_,
             sampling_ratio_, roi_cols, (scaled_boxes).flat<float>().data(),
-            (levels).flat<int32>().data(), (*output).flat<float>().data());
+            (levels).flat<int32>().data(), (*output).flat<float>().data(),debug_);
     //d.synchronize();
-    VLOG(0) << "after RoiAlign Backward, X.shape() "
+    VLOG(1) << "after RoiAlign Backward, X.shape() "
             << features.shape().DebugString()
             << " scaled_boxes=" << scaled_boxes.shape()
             << " pooled_width=" << pooled_width_
@@ -1772,6 +1705,7 @@ class ROIAlignOpGradV2 : public tensorflow::OpKernel {
   float canonical_scale_;
   int canonical_level_;
   bool is_nhwc_;
+  bool debug_;
 };
 
 class BoxEncode : public tensorflow::OpKernel {
