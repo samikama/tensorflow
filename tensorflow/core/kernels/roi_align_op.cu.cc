@@ -49,7 +49,7 @@ template <typename T>
 EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE T bilinear_interpolate(
     const T* bottom_data, const int height, const int width, T y, T x,
     const int index, /* index for debug only*/ const T* lower_bound = nullptr,
-    const T* upper_bound = nullptr, int chann = -1,bool debug=false) {
+    const T* upper_bound = nullptr, int chann = -1, bool debug = false) {
   // deal with cases that inverse elements are out of feature map boundary
   if (y < -1.0 || y > height || x < -1.0 || x > width) {
     // empty
@@ -88,10 +88,10 @@ EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE T bilinear_interpolate(
   // if (debug && chann >= 0 && chann < 4) {
   //   int diff = bottom_data - lower_bound;
   //   printf(
-  //       " BI y=%f x=%f yl=%d yh=%d xl=%d xh=%d w=%d h=%d lx=%f ly=%f v1=%f v2=%f v3=%f v4=%f c=%d index=%d "
-  //       "offset%d %d %d %d\n",
-  //       y, x, y_low, y_high, x_low, x_high, width, height, lx,ly, v1,v2,v3,v4 ,chann, index,
-  //       diff + y_low * width + x_low, diff + y_low * width + x_high,
+  //       " BI y=%f x=%f yl=%d yh=%d xl=%d xh=%d w=%d h=%d lx=%f ly=%f v1=%f
+  //       v2=%f v3=%f v4=%f c=%d index=%d " "offset%d %d %d %d\n", y, x, y_low,
+  //       y_high, x_low, x_high, width, height, lx,ly, v1,v2,v3,v4 ,chann,
+  //       index, diff + y_low * width + x_low, diff + y_low * width + x_high,
   //       diff + y_high * width + x_low, diff + y_high * width + x_high);
   // }
   T w1 = hy * hx, w2 = hy * lx, w3 = ly * hx, w4 = ly * lx;
@@ -106,7 +106,7 @@ EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC void bilinear_interpolate_gradient(
     const int height, const int width, T y, T x, T& w1, T& w2, T& w3, T& w4,
     int& x_low, int& x_high, int& y_low, int& y_high,
     const int index /* index for debug only*/, const int level = -1,
-    int chann = -1, bool debug=false) {
+    int chann = -1, bool debug = false) {
   // deal with cases that inverse elements are out of feature map boundary
   if (y < -1.0 || y > height || x < -1.0 || x > width) {
     // empty
@@ -157,8 +157,9 @@ EIGEN_ALWAYS_INLINE EIGEN_DEVICE_FUNC void bilinear_interpolate_gradient(
   return;
 }
 
-__global__ void box_iou_kernel(Cuda2DLaunchConfig config, float4* boxes, float4* ground_truths, long M,
-                               long N, float* box_iou) {
+__global__ void box_iou_kernel(Cuda2DLaunchConfig config, float4* boxes,
+                               float4* ground_truths, long M, long N,
+                               float* box_iou) {
   float xmin1, xmin2, xmax1, xmax2, ymin1, ymin2, ymax1, ymax2, x_tl, y_tl,
       x_br, y_br, w, h, inter, area1, area2, iou;
   size_t b1_idx, b2_idx, b1_row_offset, b2_row_offset;
@@ -406,8 +407,8 @@ __global__ void Boxes2ScaledBoxesAndLevels(const CudaLaunchConfig config,
                                            const T* boxes, int min_level,
                                            int max_level, float canonical_scale,
                                            int canonical_level, int* levels,
-                                           T* scaled_boxes,
-                                           bool is_bw = false,bool debug=false) {
+                                           T* scaled_boxes, bool is_bw = false,
+                                           bool debug = false) {
   CUDA_1D_KERNEL_LOOP(i, config.virtual_thread_count) {
     const T* box = boxes + i * 4;
     T* scaled_box = scaled_boxes + i * 4;
@@ -432,9 +433,10 @@ __global__ void Boxes2ScaledBoxesAndLevels(const CudaLaunchConfig config,
     scaled_box[3] = width / level_scale;
     // if(debug){
     // printf(
-    //     "BS level=%d scale=%f min=%d max=%d x1=%f y1=%f x2=%f y2=%f h=%f w=%f sqa=%f l2=%f floor=%f "
-    //     " sx1=%f sy1=%f sh=%f sw=%f i=%d is_bw=%d\n",
-    //     level, level_scale, min_level, max_level,x1,y1,x2,y2, height, width, box_area_sqrt,
+    //     "BS level=%d scale=%f min=%d max=%d x1=%f y1=%f x2=%f y2=%f h=%f w=%f
+    //     sqa=%f l2=%f floor=%f " " sx1=%f sy1=%f sh=%f sw=%f i=%d is_bw=%d\n",
+    //     level, level_scale, min_level, max_level,x1,y1,x2,y2, height, width,
+    //     box_area_sqrt,
     //     __log2f(box_area_sqrt / canonical_scale + 1e-6f),
     //     floorf(__log2f(box_area_sqrt / canonical_scale + 1e-6f) +
     //            canonical_level),
@@ -449,7 +451,8 @@ __global__ void RoIAlignForwardV2(
     const T spatial_scale, const int num_levels, const int channels,
     const int height, const int width, const int n_rois,
     const int pooled_height, const int pooled_width, const int sampling_ratio,
-    const T* scaled_roi_boxes, const int32* levels, int roi_cols, T* top_data,bool debug=false) {
+    const T* scaled_roi_boxes, const int32* levels, int roi_cols, T* top_data,
+    bool debug = false) {
   CUDA_AXIS_KERNEL_LOOP(image_index, nthreads.virtual_thread_count.y, Y) {
     CUDA_AXIS_KERNEL_LOOP(index, nthreads.virtual_thread_count.x, X) {
       // CUDA_1D_KERNEL_LOOP(index, nthreads.virtual_thread_count) {
@@ -504,8 +507,9 @@ __global__ void RoIAlignForwardV2(
           //       "ph=%d "
           //       "c=%d n=%d "
           //       "x=%f y=%f index=%d offset=%d\n",
-          //       image_index, height, width, level_height, level_width, channels,
-          //       num_levels, level, pw, ph, c, n, x, y, index,image_index * height * width * channels * num_levels +
+          //       image_index, height, width, level_height, level_width,
+          //       channels, num_levels, level, pw, ph, c, n, x, y,
+          //       index,image_index * height * width * channels * num_levels +
           // height * width * channels * level + c * height * width);
           T val = bilinear_interpolate(offset_bottom_data, level_height,
                                        level_width, y, x, index, bottom_data,
@@ -619,7 +623,7 @@ __global__ void RoIAlignBackwardFeatureV2(
     const int pooled_height, const int pooled_width, const int sampling_ratio,
     const int roi_cols, const T* input_rois,
     int32* levels,  // scaled rois,  levels
-    T* output_grads /* input_grad */,bool debug=false) {
+    T* output_grads /* input_grad */, bool debug = false) {
   CUDA_AXIS_KERNEL_LOOP(image_index, nthreads.virtual_thread_count.y, Y) {
     CUDA_AXIS_KERNEL_LOOP(index, nthreads.virtual_thread_count.x, X) {
       // CUDA_1D_KERNEL_LOOP(index, nthreads.virtual_thread_count) {
@@ -685,19 +689,22 @@ __global__ void RoIAlignBackwardFeatureV2(
 
           bilinear_interpolate_gradient(level_height, level_width, y, x, w1, w2,
                                         w3, w4, x_low, x_high, y_low, y_high,
-                                        index, level, c,debug);
+                                        index, level, c, debug);
 
           T g1 = inp_grads_this_bin * w1 / count;
           T g2 = inp_grads_this_bin * w2 / count;
           T g3 = inp_grads_this_bin * w3 / count;
           T g4 = inp_grads_this_bin * w4 / count;
           // if(debug){
-          //   printf("ALG im=%d lh=%d lw=%d l=%d pw=%d ph=%d c=%d n=%d x=%f y=%f xl=%d yl=%d xh=%d yh=%d v=%f w1=%f w2=%f w3=%f w4=%f count=%f index=%d\n",
+          //   printf("ALG im=%d lh=%d lw=%d l=%d pw=%d ph=%d c=%d n=%d x=%f
+          //   y=%f xl=%d yl=%d xh=%d yh=%d v=%f w1=%f w2=%f w3=%f w4=%f
+          //   count=%f index=%d\n",
           //   image_index,level_height,level_width,level,pw,ph,c,n,x,y,x_low,y_low,x_high,y_high,inp_grads_this_bin,w1,w2,w3,w4,count,index);
           // }
           // if (debug && (isnan(g1) || isnan(g2) || isnan(g3) || isnan(g4)) &&
           //     index < 20) {
-          //   printf("nan in gs g1=%d g2=%d g3=%d g4=%d count=%d\n", g1, g2, g3,
+          //   printf("nan in gs g1=%d g2=%d g3=%d g4=%d count=%d\n", g1, g2,
+          //   g3,
           //          g4, count);
           // }
           if (x_low >= 0 && x_high >= 0 && y_low >= 0 && y_high >= 0) {
@@ -822,11 +829,25 @@ __launch_bounds__(
             // we have score[j] <= score[i]
             above_thresh |= (1U << ib);
           }
+          // if ((((fabs(i_box.y1 - 283.) < 2.) || (fabs(j_box.y1 - 283.) < 2.))
+          // &&
+          //     ((fabs(i_box.x1 - 371.) < 5.) || (fabs(j_box.x1 - 371.) <
+          //     5)))|| i<10 ) {
+          //   printf(
+          //       "nms comparing  y1=%f x1=%f y2=%f x2=%f with y1=%f x1=%f
+          //       y2=%f " "x2=%f a=%f b=%f bt=%f above_thr=%s pos=%d
+          //       threadid=%d index=%d j=%d above_thresh=%d\n", j_box.y1,
+          //       j_box.x1, j_box.y2, j_box.x2, i_box.y1, i_box.x1, i_box.y2,
+          //       i_box.x2, a, b, bt, ((a > bt) ? "true" : "false"), i *
+          //       mask_ld + j_thread_offset /
+          //       NMS_BOXES_PER_THREAD,threadIdx.x,pos,j,above_thresh);
+          // }
         }
       }
-      if (valid)
+      if (valid) {
         d_delete_mask[i * mask_ld + j_thread_offset / NMS_BOXES_PER_THREAD] =
             above_thresh;
+      }
     }
     __syncthreads();  // making sure everyone is done reading smem
   }
@@ -876,6 +897,7 @@ tensorflow::Status nms_gpu_upright(const float* d_desc_sorted_boxes_float_ptr,
   int offset = 0;
   std::vector<int> h_keep_sorted_list;
   std::vector<int> rmv(mask_ld, 0);
+  memset(h_delete_mask, N, sizeof(int));
   while (offset < N) {
     const int ncopied = nto_copy;
     int next_offset = offset + ncopied;
@@ -895,13 +917,16 @@ tensorflow::Status nms_gpu_upright(const float* d_desc_sorted_boxes_float_ptr,
     for (int i = offset; i < next_offset; ++i) {
       int iblock = i / NMS_BOXES_PER_THREAD;
       int inblock = i % NMS_BOXES_PER_THREAD;
+      // printf("index=%d ibloc=%d inblock=%d bits ",i,iblock,inblock);
       if (!(rmv[iblock] & (1 << inblock))) {
         h_keep_sorted_list.push_back(i);
         int* p = &h_delete_mask[i * mask_ld];
         for (int ib = 0; ib < mask_ld; ++ib) {
           rmv[ib] |= p[ib];
+          // printf("%d ",p[ib]);
         }
       }
+      // printf("\n");
     }
     offset = next_offset;
   }
@@ -912,61 +937,6 @@ tensorflow::Status nms_gpu_upright(const float* d_desc_sorted_boxes_float_ptr,
                             nkeep * sizeof(int));
 
   *h_nkeep = nkeep;
-  // se::DeviceMemoryBase dev_ptr(dev_delete_mask, N * mask_ld *
-  // sizeof(int32)); const bool status =
-  //     stream->ThenMemcpy(host_delete_mask, dev_ptr, N * mask_ld *
-  //     sizeof(int32))
-  //         .ok();
-
-  // if (!status) {
-  //   return errors::Internal("Failed to launch copy from device to host.");
-  // }
-  // // device.memcpy(host_delete_mask,dev_delete_mask,N * mask_ld *
-  // // sizeof(int32));
-  // // CUDA_CHECK(cudaMemcpyAsync(&h_delete_mask[0], &d_delete_mask[0],
-  // //                            nto_copy * mask_ld * sizeof(int),
-  // //                            cudaMemcpyDeviceToHost,
-  // //                            context->cuda_stream()));
-  // auto host_filtering = [N, h_delete_mask, d_keep_sorted_list, mask_ld,
-  // h_nkeep,
-  //                        context, done]() {
-  //   auto stream = context->op_device_context()->stream();
-  //   ScopedActivateExecutorContext scoped_activation{stream->parent()};
-  //   std::vector<int> h_keep_sorted_list;
-  //   h_keep_sorted_list.reserve(N);
-  //   std::vector<int> rmv(mask_ld, 0);
-  //   for (int i = 0; i < N; ++i) {
-  //     int iblock = i / NMS_BOXES_PER_THREAD;
-  //     int inblock = i % NMS_BOXES_PER_THREAD;
-  //     if (!(rmv[iblock] & (1 << inblock))) {
-  //       h_keep_sorted_list.push_back(i);
-  //       int* p = &h_delete_mask[i * mask_ld];
-  //       for (int ib = 0; ib < mask_ld; ++ib) {
-  //         rmv[ib] |= p[ib];
-  //       }
-  //     }
-  //   }
-  //   *h_nkeep = h_keep_sorted_list.size();
-  //   se::DeviceMemoryBase dev_ptr(d_keep_sorted_list,
-  //                                h_keep_sorted_list.size() *
-  //                                sizeof(int32));
-  //   const bool status = stream
-  //                           ->ThenMemcpy(dev_ptr, &h_keep_sorted_list[0],
-  //                                        *h_nkeep * sizeof(int32))
-  //                           .ok();
-
-  //   if (!status) {
-  //     context->SetStatus(
-  //         errors::Internal("Failed to launch copy from device to host."));
-  //   }
-  // };
-  // context->device()->tensorflow_gpu_device_info()->event_mgr->ThenExecute(
-  //     stream, host_filtering);
-  // const int nkeep = h_keep_sorted_list.size();
-
-  // cudaMemcpyAsync(d_keep_sorted_list, &h_keep_sorted_list[0],
-  //                 nkeep * sizeof(int), cudaMemcpyHostToDevice,
-  //                 context->cuda_stream());
   return Status::OK();
 }
 // This kernel should execute in thenexecute otherwise memcpy and
@@ -1238,7 +1208,10 @@ __global__ void GeneratePreNMSUprightBoxesKernelV2(
         x2 -= 1.0f;
         y2 -= 1.0f;
       }
-
+      // const float y2_old=y2;
+      // const float x2_old=x2;
+      // const float x1_old=x1;
+      // const float y1_old=y1;
       // Clipping box to image
       const float img_height = d_img_info_vec[5 * image_index + 0];
       const float img_width = d_img_info_vec[5 * image_index + 1];
@@ -1263,6 +1236,12 @@ __global__ void GeneratePreNMSUprightBoxesKernelV2(
       // d_boxes_keep_flags size: (num_images,prenms_nboxes)
       // d_out_boxes size: (num_images,prenms_nboxes)
       const int out_index = image_index * prenms_nboxes + ibox;
+      // printf("SAMI Box is x1=%f x2=%f y1=%f y2=%f old x1=%f x2=%f y1=%f y2=%f
+      // score=%f keep=%s width=%f height=%f
+      // out_index=%d\n",x1,x2,y1,y2,x1_old,x2_old,y1_old,y2_old,
+      // d_inout_scores[image_index * KA + ibox],
+      // (keep_box?"true":"false"),width,height, out_index);
+
       d_boxes_keep_flags[out_index] = keep_box;
       d_out_boxes[out_index] = {x1, y1, x2, y2};
       // if(keep_box)printf("Has keep box %d\n",image_index);
@@ -1465,7 +1444,6 @@ Status AllocatePreNMSTempTensors(
       dev_postnms_rois_probs));
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_INT32, TensorShape({num_images}), dev_prenms_nboxes));
-
   int64 max_nms_mask_size =
       pre_nms_topn *
       ((pre_nms_topn + NMS_BOXES_PER_THREAD - 1) / NMS_BOXES_PER_THREAD);
@@ -1508,8 +1486,7 @@ class ROIAlignOpV2 : public tensorflow::OpKernel {
                    context->GetAttr("canonical_level", &canonical_level_));
     OP_REQUIRES_OK(context,
                    context->GetAttr("sampling_ratio", &sampling_ratio_));
-    OP_REQUIRES_OK(context,
-                   context->GetAttr("debug", &debug_));
+    OP_REQUIRES_OK(context, context->GetAttr("debug", &debug_));
 
     is_nhwc_ = false;
     CHECK_GT(spatial_scale_, 0);
@@ -1552,14 +1529,14 @@ class ROIAlignOpV2 : public tensorflow::OpKernel {
                                 TensorShape({batch, n_rois, 1}), &levels));
     CudaLaunchConfig config1D = GetCudaLaunchConfig(batch * n_rois, d);
     VLOG(1) << "Before boxes cudaconfig numelts= "
-            << config1D.virtual_thread_count << " " << name()<<" block "<<config1D.block_count
-            <<" threads="<<config1D.thread_per_block;
+            << config1D.virtual_thread_count << " " << name() << " block "
+            << config1D.block_count << " threads=" << config1D.thread_per_block;
     Boxes2ScaledBoxesAndLevels<float>
         <<<config1D.block_count, config1D.thread_per_block, 0, d.stream()>>>(
             config1D, RoIs.flat<float>().data(), min_level_, max_level_,
             canonical_scale_, canonical_level_, (levels).flat<int32>().data(),
-            (scaled_boxes).flat<float>().data(), false,debug_);
-    //d.synchronize();
+            (scaled_boxes).flat<float>().data(), false, debug_);
+    // d.synchronize();
     VLOG(1) << "after boxes scaled_shape" << scaled_boxes.shape()
             << " levels.shape" << levels.shape() << " input shape "
             << X.shape();
@@ -1581,12 +1558,13 @@ class ROIAlignOpV2 : public tensorflow::OpKernel {
             config, X.flat<float>().data(), spatial_scale_, num_levels,
             channels, height, width, n_rois, pooled_height_, pooled_width_,
             sampling_ratio_, (scaled_boxes).flat<float>().data(),
-            (levels).flat<int32>().data(), roi_cols, (*Y).flat<float>().data(),debug_);
-    //d.synchronize();
+            (levels).flat<int32>().data(), roi_cols, (*Y).flat<float>().data(),
+            debug_);
+    // d.synchronize();
     VLOG(1) << "after RoiAlign forward, X= " << X.shape().DebugString()
             << " scaled_boxes=" << scaled_boxes.shape()
             << " pooled_width=" << pooled_width_ << " output=" << Y->shape();
-    //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
+    // CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
   }
 
  private:
@@ -1619,8 +1597,7 @@ class ROIAlignOpGradV2 : public tensorflow::OpKernel {
                    context->GetAttr("canonical_level", &canonical_level_));
     OP_REQUIRES_OK(context,
                    context->GetAttr("sampling_ratio", &sampling_ratio_));
-    OP_REQUIRES_OK(context,
-                   context->GetAttr("debug", &debug_));
+    OP_REQUIRES_OK(context, context->GetAttr("debug", &debug_));
     is_nhwc_ = false;
     CHECK_GT(spatial_scale_, 0);
     CHECK_GT(pooled_height_, 0);
@@ -1657,11 +1634,11 @@ class ROIAlignOpGradV2 : public tensorflow::OpKernel {
         <<<config1D.block_count, config1D.thread_per_block, 0, d.stream()>>>(
             config1D, RoIs.flat<float>().data(), min_level_, max_level_,
             canonical_scale_, canonical_level_, (levels).flat<int32>().data(),
-            (scaled_boxes).flat<float>().data(), true,debug_);
-    //d.synchronize();
+            (scaled_boxes).flat<float>().data(), true, debug_);
+    // d.synchronize();
     VLOG(1) << "after boxes scaled_shape" << scaled_boxes.shape()
             << " levels.shape" << levels.shape();
-    //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
+    // CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
 
     Cuda2DLaunchConfig config = GetCuda2DLaunchConfig(
         n_rois * channels * pooled_height_ * pooled_width_, batch, d);
@@ -1685,14 +1662,15 @@ class ROIAlignOpGradV2 : public tensorflow::OpKernel {
             config, grads.flat<float>().data(), spatial_scale_, num_levels,
             channels, height, width, n_rois, pooled_height_, pooled_width_,
             sampling_ratio_, roi_cols, (scaled_boxes).flat<float>().data(),
-            (levels).flat<int32>().data(), (*output).flat<float>().data(),debug_);
-    //d.synchronize();
+            (levels).flat<int32>().data(), (*output).flat<float>().data(),
+            debug_);
+    // d.synchronize();
     VLOG(1) << "after RoiAlign Backward, X.shape() "
             << features.shape().DebugString()
             << " scaled_boxes=" << scaled_boxes.shape()
             << " pooled_width=" << pooled_width_
             << "output shape=" << output->shape();
-    //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
+    // CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
   }
 
  private:
@@ -1740,9 +1718,9 @@ class BoxEncode : public tensorflow::OpKernel {
         (float4*)ground_truth.flat<float>().data(), weight_x_, weight_y_,
         weight_w_, weight_h_, labels.flat<float>().data(),
         (float4*)(*output).flat<float>().data());
-    //d.synchronize();
+    // d.synchronize();
     VLOG(1) << "after encode_boxes " << name();
-    //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
+    // CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
   }
 
  private:
@@ -1773,16 +1751,16 @@ class BoxIntersectionOverUnion : public tensorflow::OpKernel {
     const GPUDevice& d = context->eigen_device<GPUDevice>();
     Cuda2DLaunchConfig config =
         GetCuda2DLaunchConfig(num_boxes * num_gt, batch, d);
-    VLOG(1) << "Before encode_boxes= " << config.virtual_thread_count.x << " "<< config.virtual_thread_count.y<<" "
-            << name();
+    VLOG(1) << "Before encode_boxes= " << config.virtual_thread_count.x << " "
+            << config.virtual_thread_count.y << " " << name();
     box_iou_kernel<<<config.block_count, config.thread_per_block, 0,
                      d.stream()>>>(config, (float4*)boxes.flat<float>().data(),
                                    (float4*)ground_truth.flat<float>().data(),
                                    num_boxes, num_gt,
                                    (*output).flat<float>().data());
-    //d.synchronize();
+    // d.synchronize();
     VLOG(1) << "after encode_boxes " << name();
-    //CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
+    // CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
   }
 
  private:
@@ -1931,6 +1909,7 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
     int* d_prenms_nboxes = dev_prenms_nboxes.flat<int>().data();
     int h_prenms_nboxes;
     char* d_boxes_keep_flags = (char*)dev_boxes_keep_flags.flat<int8>().data();
+
     float* d_postnms_rois = dev_postnms_rois.flat<float>().data();
     float* d_postnms_rois_probs = dev_postnms_rois_probs.flat<float>().data();
     char* d_cub_select_temp_storage =
@@ -1943,7 +1922,23 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
     int* h_nms_mask = host_nms_mask.flat<int>().data();
     int* d_nms_mask = dev_nms_mask.flat<int>().data();
     float* d_sorted_scores = dev_sorted_scores.flat<float>().data();
+    CudaLaunchConfig zconfig =
+        GetCudaLaunchConfig(dev_postnms_rois_probs.NumElements(), d);
+    SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+        zconfig.virtual_thread_count,
+        dev_postnms_rois_probs.flat<float>().data());
+
     for (int image_index = 0; image_index < num_images; ++image_index) {
+      zconfig = GetCudaLaunchConfig(dev_nms_mask.NumElements(), d);
+      SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+          zconfig.virtual_thread_count, d_nms_mask);
+      zconfig = GetCudaLaunchConfig(dev_nms_mask.NumElements(), d);
+      SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+          zconfig.virtual_thread_count, d_nms_mask);
+      zconfig = GetCudaLaunchConfig(dev_image_boxes_keep_list.NumElements(), d);
+      SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+          zconfig.virtual_thread_count, d_image_boxes_keep_list);
+
       // Sub matrices for current image
       const float* d_image_boxes =
           &d_boxes[image_index * nboxes_generated * box_dim];
@@ -2049,6 +2044,7 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
     OP_REQUIRES_OK(context, context->GetAttr("post_nms_topn", &post_nms_topn_));
     OP_REQUIRES_OK(context, context->GetAttr("nms_threshold", &nms_threshold_));
     OP_REQUIRES_OK(context, context->GetAttr("min_size", &min_size_));
+    OP_REQUIRES_OK(context, context->GetAttr("debug", &debug_));
     // compatibility for detectron like networks. False for generic case
     OP_REQUIRES_OK(context, context->GetAttr("correct_transform_coords",
                                              &correct_transform_coords_));
@@ -2171,6 +2167,12 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
             &host_nms_mask, num_images, nboxes_generated, box_dim,
             this->post_nms_topn_, this->pre_nms_topn_),
         done);
+    CudaLaunchConfig zconfig =
+        GetCudaLaunchConfig(dev_postnms_rois_probs.NumElements(), d);
+    SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+        zconfig.virtual_thread_count,
+        dev_postnms_rois_probs.flat<float>().data());
+
     int* d_prenms_nboxes = dev_prenms_nboxes.flat<int>().data();
     int h_prenms_nboxes;
     char* d_boxes_keep_flags = (char*)dev_boxes_keep_flags.flat<int8>().data();
@@ -2199,9 +2201,14 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
         done);
     float* d_postnms_rois = (*output_rois).flat<float>().data();
     float* d_postnms_rois_probs = (*output_roi_probs).flat<float>().data();
-
     for (int image_index = 0; image_index < num_images; ++image_index) {
       // Sub matrices for current image
+      zconfig = GetCudaLaunchConfig(dev_nms_mask.NumElements(), d);
+      SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+          zconfig.virtual_thread_count, d_nms_mask);
+      zconfig = GetCudaLaunchConfig(dev_image_boxes_keep_list.NumElements(), d);
+      SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+          zconfig.virtual_thread_count, d_image_boxes_keep_list);
       const float* d_image_boxes =
           &d_boxes[image_index * nboxes_generated * box_dim];
       const float* d_image_sorted_scores =
@@ -2281,13 +2288,6 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
   }
 
  private:
-  // .Output("rois: float")
-  // .Output("roi_probabilities: float")
-  // .Attr("spatial_scale: float = 1.0")
-  // .Attr("pre_nms_topN: int")
-  // .Attr("post_nms_topN: int")
-  // .Attr("nms_threshold: float")
-  // .Attr("min_size: float")
   struct SharedData {
     SharedData() : n_rois_in_output(0), prenms_nboxes(0), nkeep(0){};
     int n_rois_in_output;
@@ -2303,6 +2303,7 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
   float feat_stride_;
   float bbox_xform_clip_default_;
   bool correct_transform_coords_;
+  bool debug_;
 };
 
 #undef GENRPN_BOXES_PER_THREAD
@@ -2324,9 +2325,9 @@ REGISTER_KERNEL_BUILDER(Name("ROIAlignV2Grad").Device(tensorflow::DEVICE_GPU),
                         tensorflow::sami::ROIAlignOpGradV2);
 REGISTER_KERNEL_BUILDER(Name("BoxEncode").Device(tensorflow::DEVICE_GPU),
                         tensorflow::sami::BoxEncode);
-REGISTER_KERNEL_BUILDER(Name("BoxIntersectionOverUnion").Device(tensorflow::DEVICE_GPU),
-                        tensorflow::sami::BoxIntersectionOverUnion);
-
+REGISTER_KERNEL_BUILDER(
+    Name("BoxIntersectionOverUnion").Device(tensorflow::DEVICE_GPU),
+    tensorflow::sami::BoxIntersectionOverUnion);
 
 }  // namespace tensorflow
 #endif

@@ -164,6 +164,7 @@ REGISTER_OP("GenerateBoundingBoxProposalsV2")
     .Attr("post_nms_topn: int = 300")
     .Attr("nms_threshold: float = 0.7")
     .Attr("min_size: float = 16")
+    .Attr("debug: bool = false")
     .Attr("correct_transform_coords: bool = true")
     .SetShapeFn([](InferenceContext* c) -> Status {
       // make sure input tensors have are correct rank
