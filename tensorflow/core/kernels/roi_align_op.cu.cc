@@ -1389,31 +1389,65 @@ Status AllocateGenerationTempTensors(
     Tensor* d_sorted_scores, Tensor* dev_boxes, Tensor* dev_boxes_keep_flags,
     int num_images, int conv_layer_nboxes, size_t cub_sort_temp_storage_bytes,
     size_t cub_select_temp_storage_bytes, int nboxes_to_generate, int box_dim) {
+  auto d = context->eigen_gpu_device();
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_INT32, TensorShape({num_images, conv_layer_nboxes}),
       d_conv_layer_indexes));
+  CudaLaunchConfig zconfig =
+      GetCudaLaunchConfig(d_conv_layer_indexes->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count,
+      (*d_conv_layer_indexes).flat<int32>().data());
+
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_INT32, TensorShape({num_images + 1}), d_image_offset));
+  zconfig = GetCudaLaunchConfig(d_image_offset->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count, (*d_image_offset).flat<int32>().data());
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_INT8, TensorShape({(int64)cub_sort_temp_storage_bytes}),
       d_cub_sort_buffer));
+  zconfig = GetCudaLaunchConfig(d_cub_sort_buffer->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count, (*d_cub_sort_buffer).flat<int8>().data());
+
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_INT8, TensorShape({(int64)cub_select_temp_storage_bytes}),
       d_cub_select_buffer));
+  zconfig = GetCudaLaunchConfig(d_cub_select_buffer->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count, (*d_cub_select_buffer).flat<int8>().data());
 
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_INT32, TensorShape({num_images, conv_layer_nboxes}),
       d_sorted_conv_layer_indexes));
+  zconfig = GetCudaLaunchConfig(d_sorted_conv_layer_indexes->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count,
+      (*d_sorted_conv_layer_indexes).flat<int32>().data());
 
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_FLOAT, TensorShape({num_images, conv_layer_nboxes}),
       d_sorted_scores));
+  zconfig = GetCudaLaunchConfig(d_sorted_scores->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count, (*d_sorted_scores).flat<float>().data());
+
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_FLOAT,
       TensorShape({num_images, box_dim * nboxes_to_generate}), dev_boxes));
+  zconfig = GetCudaLaunchConfig(dev_boxes->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count, (*dev_boxes).flat<float>().data());
+
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_INT8, TensorShape({num_images, nboxes_to_generate}),
       dev_boxes_keep_flags));
+  zconfig = GetCudaLaunchConfig(dev_boxes_keep_flags->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count,
+      (*dev_boxes_keep_flags).flat<int8>().data());
+
   return Status::OK();
 }
 
@@ -1424,29 +1458,60 @@ Status AllocatePreNMSTempTensors(
     Tensor* dev_prenms_nboxes, Tensor* dev_nms_mask, Tensor* host_nms_mask,
     int num_images, int nboxes_to_generate, int box_dim, int post_nms_topn,
     int pre_nms_topn) {
+  auto d = context->eigen_gpu_device();
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_FLOAT, TensorShape({box_dim * nboxes_to_generate}),
       dev_image_prenms_boxes));
+  CudaLaunchConfig zconfig =
+      GetCudaLaunchConfig(dev_image_prenms_boxes->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count,
+      (*dev_image_prenms_boxes).flat<float>().data());
+
   TF_RETURN_IF_ERROR(context->allocate_temp(DataType::DT_FLOAT,
                                             TensorShape({nboxes_to_generate}),
                                             dev_image_prenms_scores));
+
+  zconfig = GetCudaLaunchConfig(dev_image_prenms_scores->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count,
+      (*dev_image_prenms_scores).flat<float>().data());
+
   TF_RETURN_IF_ERROR(context->allocate_temp(DataType::DT_INT32,
                                             TensorShape({nboxes_to_generate}),
                                             dev_image_boxes_keep_list));
+  zconfig = GetCudaLaunchConfig(dev_image_boxes_keep_list->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count,
+      (*dev_image_boxes_keep_list).flat<int32>().data());
+
   const int roi_cols = box_dim + 1;
   const int max_postnms_nboxes = std::min(nboxes_to_generate, post_nms_topn);
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_FLOAT,
       TensorShape({roi_cols * num_images * max_postnms_nboxes}),
       dev_postnms_rois));
+  zconfig = GetCudaLaunchConfig(dev_postnms_rois->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count, (*dev_postnms_rois).flat<float>().data());
+
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_FLOAT, TensorShape({num_images * max_postnms_nboxes}),
       dev_postnms_rois_probs));
+  zconfig = GetCudaLaunchConfig(dev_postnms_rois_probs->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count,
+      (*dev_postnms_rois_probs).flat<float>().data());
+
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_INT32, TensorShape({num_images}), dev_prenms_nboxes));
   int64 max_nms_mask_size =
       pre_nms_topn *
       ((pre_nms_topn + NMS_BOXES_PER_THREAD - 1) / NMS_BOXES_PER_THREAD);
+  zconfig = GetCudaLaunchConfig(dev_prenms_nboxes->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count, (*dev_prenms_nboxes).flat<int32>().data());
+
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_INT32, TensorShape({max_nms_mask_size}), dev_nms_mask));
   AllocatorAttributes alloc_attr;
