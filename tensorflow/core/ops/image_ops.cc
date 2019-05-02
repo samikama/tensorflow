@@ -841,7 +841,18 @@ REGISTER_OP("NonMaxSuppressionV2")
 
       c->set_output(0, c->Vector(c->UnknownDim()));
       return Status::OK();
-    });
+    })
+    .Doc(R"doc(
+      Starting from highest scoring boxes, filters any box which has a 
+      intersection-over-union ratio greater that 'iou_threshold' and a smaller score.
+      Inputs
+        boxes: [N,4] Float/Half, input boxes in [y1,x1,y2,x2]
+        scores: [N] Float/Half, not necessarily sorted.
+        max_output_size: Int32, maximum length of selected_indices;
+        iou_threshold: Float in [0,1] intersection_over_union (i.e overlap ratio) threshold to consider for suppression
+      Output:
+        selected_indices: [K] Int32, indices of the selected boxes 0< K <min(N,max_output_size).
+    )doc");
 
 REGISTER_OP("NonMaxSuppressionV3")
     .Input("boxes: T")
@@ -925,4 +936,125 @@ REGISTER_OP("CombinedNonMaxSuppression")
     .Attr("clip_boxes: bool = true")
     .SetShapeFn(CombinedNMSShapeFn);
 
+REGISTER_OP("ROIAlign")
+    .Input("input: float")
+    .Input("rois: float")
+    .Output("output: float")
+    .Attr("spatial_scale: float = 1.0")
+    .Attr("pooled_height: int = 1")
+    .Attr("pooled_width: int = 1")
+    .Attr("sampling_ratio: int = -1")
+    .Attr("min_level: int = 2")
+    .Attr("max_level: int = 5")
+    .Attr("canonical_scale: float = 224.0")
+    .Attr("canonical_level: int = 4")
+    .Attr("debug: bool = false")
+    .SetShapeFn([](InferenceContext* c) -> Status {
+      // 5D feature inputs [N,L,C,H,W]
+      ShapeHandle features;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 5, &features));
+      // 3D roi boxes [N,R,4] [ y1, x1, y2, x2]
+      ShapeHandle boxes;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 3, &boxes));
+
+      auto input_shape = c->input(0);
+      auto roi_shape = c->input(1);
+      int pooled_h;
+      TF_RETURN_IF_ERROR(c->GetAttr("pooled_height", &pooled_h));
+      int pooled_w;
+      TF_RETURN_IF_ERROR(c->GetAttr("pooled_width", &pooled_w));
+      auto Rdim = c->Dim(roi_shape, 1);    // Num boxes i.e K
+      auto Cdim = c->Dim(input_shape, 2);  // Num channels = C
+      auto output_shape = c->MakeShape({c->Dim(input_shape, 0), Rdim, Cdim,
+                                        pooled_h, pooled_w});  // N, K, C, H, W
+
+      c->set_output(0, output_shape);
+      return Status::OK();
+    })
+    .Doc(R"doc(
+      This op implements Region of Interest(RoI) align op as documented in arXiv:1703.06870.
+      In short, it creates and pooled_height x pooled_width image from RoI using bilinear interpolation. 
+      input: is a 5D tensor from feature layers of the layout [Batch, Level, Channel, Height, Width]
+      rois: is a 3D tensor for describing region of interest boxes and has layout [Batch, Roi Id, 4]. 
+        last 4 elements define the corners of the roi box and is of the form  [y1, x1, y2, x2]
+      output: is 5D tensor  of [Batch, Roi Id, Channel, Pooled Height, Pooled Width]
+      pooled_height and pooled_width are the height and width of pooled window
+      min_level and max_level defines minimum and maximum levels in FPN pyramid
+      canonical_scale and canonical_level are parameters for assingning roi boxes to corresponding 
+        FPN level
+      spatial_scale is the scaling factor for the roi boxes.
+    )doc");
+
+REGISTER_OP("ROIAlignGrad")
+    .Input("grads: float")
+    .Input("input: float")
+    .Input("rois: float")
+    .Output("output: float")
+    .Attr("spatial_scale: float = 1.0")
+    .Attr("pooled_height: int = 1")
+    .Attr("pooled_width: int = 1")
+    .Attr("sampling_ratio: int = -1")
+    .Attr("min_level: int = 2")
+    .Attr("max_level: int = 5")
+    .Attr("canonical_scale: float = 224.0")
+    .Attr("canonical_level: int = 4")
+    .Attr("debug: bool = false")
+    .SetShapeFn([](InferenceContext* c) -> Status {
+      c->set_output(0, c->input(1));
+      return Status::OK();
+    })
+    .Doc(R"doc(
+      Gradient for RoiAlign op.
+    )doc");
+
+REGISTER_OP("GenerateBoundingBoxProposals")
+    .Input("scores: float")
+    .Input("bbox_deltas: float")
+    .Input("image_info: float")
+    .Input("anchors: float")
+    .Output("rois: float")
+    .Output("roi_probabilities: float")
+    .Attr("pre_nms_topn: int = 6000")
+    .Attr("post_nms_topn: int = 300")
+    .Attr("nms_threshold: float = 0.7")
+    .Attr("min_size: float = 16")
+    .Attr("debug: bool = false")
+    .Attr("correct_transform_coords: bool = true")
+    .SetShapeFn([](InferenceContext* c) -> Status {
+      // make sure input tensors have are correct rank
+      ShapeHandle scores, images, bounding_boxes, anchors;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 4, &scores));  //(N, H, W, A)
+      TF_RETURN_IF_ERROR(
+          c->WithRank(c->input(1), 4, &bounding_boxes));         //(N,H,W,A4)
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 2, &images));  // (N,5)
+      auto im_info = c->Dim(images, 1);
+      TF_RETURN_IF_ERROR(c->WithValue(im_info, 5, &im_info));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 3, &anchors));  // (A4)
+      // TODO(skama): verify that the inputs are compatible
+      int post_nms_top_n;
+      TF_RETURN_IF_ERROR(c->GetAttr("post_nms_topn", &post_nms_top_n));
+      auto roi_shape = c->MakeShape(
+          {c->Dim(scores, 0), post_nms_top_n, 4});  //(N,post_nms_top_n,4)
+      auto prob_shape = c->MakeShape(
+          {c->Dim(scores, 0), post_nms_top_n});  // (N,post_nms_top_n)
+      c->set_output(0, roi_shape);
+      c->set_output(1, prob_shape);
+      return Status::OK();
+    })
+    .Doc(R"doc(
+      This op produces Region of Interests from given bounding boxes(bbox_deltas) encoded wrt 
+      anchors according to eq.2 in arXiv:1506.01497
+      The op selects top pre_nms_topn scoring boxes, decodes them with respect to anchors, 
+      applies non-maximal suppression on overlapping boxes with higher than 
+      nms_threshold intersection-over-union (iou) value, discarding boxes where shorter 
+      side is less than min_size.
+
+      scores: A 4D tensor of shape [Batch, Height, Width, Num Anchors] containing the scores per anchor at given postion
+      bbox_deltas: is a tensor of shape [Batch, Height, Width, 4 x Num Anchors] boxes encoded to each anchor
+      anchors: A 1D tensor of shape [4 x Num Anchors], representing the anchors.
+
+      rois: output RoIs, a 3D tensor of shape [Batch, post_nms_topn, 4], padded by 0 if less than post_nms_topn candidates found.
+      roi_probabilities: probability scores of each roi in 'rois', a 2D tensor of shape [Batch,post_nms_topn], padded with 0 if needed.
+      
+    )doc");
 }  // namespace tensorflow
