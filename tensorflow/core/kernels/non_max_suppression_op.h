@@ -35,7 +35,7 @@ struct NonMaxSuppression {
 }  // namespace functor
 #if GOOGLE_CUDA
 extern const int NMS_BOXES_PER_THREAD;
-tensorflow::Status nms_gpu_upright(const float* d_desc_sorted_boxes_float_ptr,
+tensorflow::Status nms_gpu(const float* d_desc_sorted_boxes_float_ptr,
                                    const int N, const float thresh,
                                    int* d_keep_sorted_list, int* h_nkeep,
                                    int* dev_delete_mask, int* host_delete_mask,

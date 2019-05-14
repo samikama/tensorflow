@@ -156,6 +156,8 @@ __global__ void GeneratePreNMSUprightBoxesKernel(
   }
 }
 
+// Copy the selected boxes and scores to output tensors.
+//
 __global__ void WriteUprightBoxesOutput(
     const CudaLaunchConfig nboxes, const float4* d_image_boxes,
     const float* d_image_scores, const int* d_image_boxes_keep_list,
@@ -183,6 +185,9 @@ __global__ void WriteUprightBoxesOutput(
     }
   }
 }
+
+// Allocate scratch spaces that are needed for operation
+//
 
 Status AllocateGenerationTempTensors(
     OpKernelContext* context, Tensor* d_conv_layer_indexes,
@@ -253,6 +258,7 @@ Status AllocateGenerationTempTensors(
   return Status::OK();
 }
 
+// Allocate workspace for NMS operation
 Status AllocatePreNMSTempTensors(
     OpKernelContext* context, Tensor* dev_image_prenms_boxes,
     Tensor* dev_image_prenms_scores, Tensor* dev_image_boxes_keep_list,
@@ -287,11 +293,10 @@ Status AllocatePreNMSTempTensors(
       zconfig.virtual_thread_count,
       (*dev_image_boxes_keep_list).flat<int32>().data());
 
-  const int roi_cols = box_dim + 1;
   const int max_postnms_nboxes = std::min(nboxes_to_generate, post_nms_topn);
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_FLOAT,
-      TensorShape({roi_cols * num_images * max_postnms_nboxes}),
+      TensorShape({box_dim * num_images * max_postnms_nboxes}),
       dev_postnms_rois));
   zconfig = GetCudaLaunchConfig(dev_postnms_rois->NumElements(), d);
   SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
@@ -307,15 +312,20 @@ Status AllocatePreNMSTempTensors(
 
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_INT32, TensorShape({num_images}), dev_prenms_nboxes));
-  int64 max_nms_mask_size =
-      pre_nms_topn *
-      ((pre_nms_topn + NMS_BOXES_PER_THREAD - 1) / NMS_BOXES_PER_THREAD);
   zconfig = GetCudaLaunchConfig(dev_prenms_nboxes->NumElements(), d);
   SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
       zconfig.virtual_thread_count, (*dev_prenms_nboxes).flat<int32>().data());
+  int64 max_nms_mask_size =
+      pre_nms_topn *
+      ((pre_nms_topn + NMS_BOXES_PER_THREAD - 1) / NMS_BOXES_PER_THREAD);
 
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_INT32, TensorShape({max_nms_mask_size}), dev_nms_mask));
+
+  zconfig = GetCudaLaunchConfig(dev_nms_mask->NumElements(), d);
+  SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
+      zconfig.virtual_thread_count, (*dev_nms_mask).flat<int32>().data());
+
   AllocatorAttributes alloc_attr;
   alloc_attr.set_on_host(true);
   alloc_attr.set_gpu_compatible(true);
@@ -324,6 +334,9 @@ Status AllocatePreNMSTempTensors(
                                             host_nms_mask, alloc_attr));
   return Status::OK();
 }
+
+// Initialize index and offset arrays.
+// num_images is the batch size, KA is the number of anchors
 __global__ void InitializeDataKernel(const Cuda2DLaunchConfig config,
                                      int* d_image_offsets,
                                      int* d_boxes_keys_iota) {
@@ -384,12 +397,13 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
     const auto A = scores.dim_size(3);
     const auto H = scores.dim_size(1);
     const auto W = scores.dim_size(2);
-    const auto box_dim = anchors.dim_size(2) / A;
+    const auto box_dim = anchors.dim_size(0) / A;
     CHECK_EQ(box_dim, 4);
     // TODO(skama): make sure that inputs are ok.
     const int K = H * W;
     // VLOG(0)<<"num_images="<<num_images<<" A="<<A<<" H="<<H<<" W="<<W;
-    const int conv_layer_nboxes = K * A;
+    const int conv_layer_nboxes =
+        K * A;  // total number of boxes when decoded on anchors.
     // The following calls to CUB primitives do nothing
     // (because the first arg is nullptr)
     // except setting cub_*_temp_storage_bytes
@@ -411,14 +425,16 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
         nullptr, cub_select_temp_storage_bytes, f4_ptr, char_ptr, f4_ptr,
         int_ptr, K * A, cuda_stream);
     CHECK_EQ(cuda_ret, CUDA_SUCCESS);
-    Tensor d_conv_layer_indexes;
-    Tensor d_image_offset;
-    Tensor d_cub_sort_buffer;
-    Tensor d_cub_select_buffer;
-    Tensor d_sorted_conv_layer_indexes;
-    Tensor dev_sorted_scores;
-    Tensor dev_boxes;
-    Tensor dev_boxes_keep_flags;
+    Tensor d_conv_layer_indexes;  // box indices on device
+    Tensor d_image_offset;        // starting offsets boxes for each image
+    Tensor d_cub_sort_buffer;     // buffer for cub sorting
+    Tensor d_cub_select_buffer;   // buffer for cub selection
+    Tensor d_sorted_conv_layer_indexes;  // output of cub sorting, indices of
+                                         // the sorted boxes
+    Tensor dev_sorted_scores;            // sorted scores, cub output
+    Tensor dev_boxes;                    // boxes on device
+    Tensor dev_boxes_keep_flags;  // bitmask for keeping the boxes or rejecting
+                                  // from output
     const int nboxes_to_generate = std::min(conv_layer_nboxes, pre_nms_topn_);
     OP_REQUIRES_OK_ASYNC(
         context,
@@ -432,10 +448,15 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
     const GPUDevice& d = context->eigen_device<GPUDevice>();
     Cuda2DLaunchConfig conf2d =
         GetCuda2DLaunchConfig(conv_layer_nboxes, num_images, d);
+    // create box indices and offsets for each image on device
     InitializeDataKernel<<<conf2d.block_count, conf2d.thread_per_block, 0,
                            d.stream()>>>(
         conf2d, d_image_offset.flat<int>().data(),
         d_conv_layer_indexes.flat<int>().data());
+
+    // sort boxes with their scores.
+    // d_sorted_conv_layer_indexes will hold the pointers to old indices.
+
     cuda_ret = cub::DeviceSegmentedRadixSort::SortPairsDescending(
         d_cub_sort_buffer.flat<int8>().data(), cub_sort_temp_storage_bytes,
         scores.flat<float>().data(), dev_sorted_scores.flat<float>().data(),
@@ -449,6 +470,9 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
     // Keeping only the topN pre_nms
     CHECK_EQ(cuda_ret, CUDA_SUCCESS);
     conf2d = GetCuda2DLaunchConfig(nboxes_to_generate, num_images, d);
+
+    // create box y1,x1,y2,x2 from box_deltas and anchors (decode the boxes) and
+    // mark the boxes which are smaller that min_size_ ignored.
     GeneratePreNMSUprightBoxesKernel<<<
         conf2d.block_count, conf2d.thread_per_block, 0, d.stream()>>>(
         conf2d, d_sorted_conv_layer_indexes.flat<int>().data(),
@@ -471,6 +495,7 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
     Tensor dev_prenms_nboxes;
     Tensor dev_nms_mask;
     Tensor host_nms_mask;
+    // Allocate workspaces needed for NMS
     OP_REQUIRES_OK_ASYNC(
         context,
         AllocatePreNMSTempTensors(
@@ -480,25 +505,23 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
             &host_nms_mask, num_images, nboxes_generated, box_dim,
             this->post_nms_topn_, this->pre_nms_topn_),
         done);
-    CudaLaunchConfig zconfig =
-        GetCudaLaunchConfig(dev_postnms_rois_probs.NumElements(), d);
-    SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
-        zconfig.virtual_thread_count,
-        dev_postnms_rois_probs.flat<float>().data());
-
+    // get the pointers for temp storages
     int* d_prenms_nboxes = dev_prenms_nboxes.flat<int>().data();
-    int h_prenms_nboxes;
-    char* d_boxes_keep_flags = (char*)dev_boxes_keep_flags.flat<int8>().data();
+    int h_prenms_nboxes = 0;
     char* d_cub_select_temp_storage =
         (char*)d_cub_select_buffer.flat<int8>().data();
     float* d_image_prenms_boxes = dev_image_prenms_boxes.flat<float>().data();
     float* d_image_prenms_scores = dev_image_prenms_scores.flat<float>().data();
     int* d_image_boxes_keep_list = dev_image_boxes_keep_list.flat<int>().data();
-    int nrois_in_output = 0;
-    float* d_boxes = dev_boxes.flat<float>().data();
     int* h_nms_mask = host_nms_mask.flat<int>().data();
     int* d_nms_mask = dev_nms_mask.flat<int>().data();
+    int nrois_in_output = 0;
+    // get the pointers to boxes and scores
+    char* d_boxes_keep_flags = (char*)dev_boxes_keep_flags.flat<int8>().data();
+    float* d_boxes = dev_boxes.flat<float>().data();
     float* d_sorted_scores = dev_sorted_scores.flat<float>().data();
+
+    // Create output tensors
     Tensor* output_rois = nullptr;
     Tensor* output_roi_probs = nullptr;
     OP_REQUIRES_OK_ASYNC(
@@ -514,21 +537,29 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
         done);
     float* d_postnms_rois = (*output_rois).flat<float>().data();
     float* d_postnms_rois_probs = (*output_roi_probs).flat<float>().data();
+
+    // Do  per-image nms
+    CudaLaunchConfig zconfig;
     for (int image_index = 0; image_index < num_images; ++image_index) {
-      // Sub matrices for current image
+      // reset output workspaces
       zconfig = GetCudaLaunchConfig(dev_nms_mask.NumElements(), d);
       SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
           zconfig.virtual_thread_count, d_nms_mask);
       zconfig = GetCudaLaunchConfig(dev_image_boxes_keep_list.NumElements(), d);
       SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
           zconfig.virtual_thread_count, d_image_boxes_keep_list);
+      // Sub matrices for current image
+      // boxes
       const float* d_image_boxes =
           &d_boxes[image_index * nboxes_generated * box_dim];
+      // scores
       const float* d_image_sorted_scores =
           &d_sorted_scores[image_index * K * A];
+      // keep flags
       char* d_image_boxes_keep_flags =
           &d_boxes_keep_flags[image_index * nboxes_generated];
 
+      // Output buffer for image
       float* d_image_postnms_rois =
           &d_postnms_rois[image_index * roi_cols * post_nms_topn_];
       float* d_image_postnms_rois_probs =
@@ -559,9 +590,8 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
       // printf("Host boxes=%d ngen=%d\n",h_prenms_nboxes,nboxes_generated);
       int nkeep;
       // printf("Before nms\n");
-      nms_gpu_upright(d_image_prenms_boxes, prenms_nboxes, nms_threshold_,
-                      d_image_boxes_keep_list, &nkeep, d_nms_mask, h_nms_mask,
-                      context);
+      nms_gpu(d_image_prenms_boxes, prenms_nboxes, nms_threshold_,
+              d_image_boxes_keep_list, &nkeep, d_nms_mask, h_nms_mask, context);
       CHECK_EQ(cudaGetLastError(), CUDA_SUCCESS);
       // printf("After nms nkeep=%d\n",nkeep);
       // All operations done after previous sort were keeping the relative order
