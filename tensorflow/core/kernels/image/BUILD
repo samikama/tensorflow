@@ -4,6 +4,7 @@ load(
     "//tensorflow:tensorflow.bzl",
     "if_android",
     "if_cuda_or_rocm",
+
     "tf_cc_test",
     "tf_cc_tests",
     "tf_copts",
@@ -18,6 +19,7 @@ load("//tensorflow:tensorflow.bzl", "filegroup")
 
 # buildifier: disable=same-origin-load
 load("//tensorflow:tensorflow.bzl", "tf_cuda_cc_test")
+load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
 
 # buildifier: disable=same-origin-load
 load("//tensorflow:tensorflow.bzl", "tf_kernel_library")
@@ -121,6 +123,7 @@ cc_library(
         ":resize_bicubic_op",
         ":resize_bilinear_op",
         ":resize_nearest_neighbor_op",
+        ":roi_align_op",
         ":sample_distorted_bounding_box_op",
         ":scale_and_translate_op",
     ],
@@ -294,6 +297,12 @@ tf_kernel_library(
     name = "resize_nearest_neighbor_op",
     prefix = "resize_nearest_neighbor_op",
     deps = IMAGE_DEPS,
+)
+
+tf_kernel_library(
+    name = "roi_align_op",
+    prefix = "roi_align_op",
+    deps = IMAGE_DEPS 
 )
 
 tf_kernel_library(
