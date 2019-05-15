@@ -30,8 +30,8 @@ limitations under the License.
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/stream_executor.h"
 #include "tensorflow/core/platform/types.h"
-#include "tensorflow/core/util/cuda_kernel_helper.h"
-#include "tensorflow/core/util/cuda_launch_config.h"
+#include "tensorflow/core/util/gpu_kernel_helper.h"
+#include "tensorflow/core/util/gpu_launch_config.h"
 #include "third_party/cub/device/device_radix_sort.cuh"
 #include "third_party/cub/device/device_segmented_radix_sort.cuh"
 #include "third_party/cub/device/device_select.cuh"
@@ -416,7 +416,7 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
         int_ptr, num_images * conv_layer_nboxes, num_images, int_ptr, int_ptr,
         0, 8 * sizeof(float),  // sort all bits
         cuda_stream);
-    CHECK_EQ(cuda_ret, CUDA_SUCCESS);
+    CHECK_EQ(cuda_ret, cudaSuccess);
     // get the size of select temp buffer
     size_t cub_select_temp_storage_bytes = 0;
     char* char_ptr = nullptr;

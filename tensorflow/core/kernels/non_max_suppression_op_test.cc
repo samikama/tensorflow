@@ -361,16 +361,17 @@ TEST_F(NonMaxSuppressionV2OpTest, TestEmptyInput) {
 class NonMaxSuppressionV2GPUOpTest : public OpsTestBase {
  protected:
   void MakeOp() {
-          SetDevice(DEVICE_GPU,
-                std::unique_ptr<tensorflow::Device>(DeviceFactory::NewDevice(
-                    "GPU", {}, "/job:a/replica:0/task:0")));
+    SetDevice(DEVICE_GPU,
+              std::unique_ptr<tensorflow::Device>(DeviceFactory::NewDevice(
+                  "GPU", {}, "/job:a/replica:0/task:0")));
 
-    TF_EXPECT_OK(NodeDefBuilder("non_max_suppression_op_gpu", "NonMaxSuppressionV2")
-                     .Input(FakeInput(DT_FLOAT))
-                     .Input(FakeInput(DT_FLOAT))
-                     .Input(FakeInput(DT_INT32))
-                     .Input(FakeInput(DT_FLOAT))
-                     .Finalize(node_def()));
+    TF_EXPECT_OK(
+        NodeDefBuilder("non_max_suppression_op_gpu", "NonMaxSuppressionV2")
+            .Input(FakeInput(DT_FLOAT))
+            .Input(FakeInput(DT_FLOAT))
+            .Input(FakeInput(DT_INT32))
+            .Input(FakeInput(DT_FLOAT))
+            .Finalize(node_def()));
     TF_EXPECT_OK(InitOp());
   }
 };
@@ -395,8 +396,13 @@ TEST_F(NonMaxSuppressionV2GPUOpTest,
        TestSelectFromThreeClustersFlippedCoordinates) {
   MakeOp();
   AddInputFromArray<float>(TensorShape({6, 4}),
-                           {1, 1,  0, 0,  0, 0.1f,  1, 1.1f,  0, .9f, 1, -0.1f,
-                            0, 10, 1, 11, 1, 10.1f, 0, 11.1f, 1, 101, 0, 100});
+                           {1, 1,     0, 0,      // score= 0.9
+                            0, 0.1f,  1, 1.1f,   // score= 0.75
+                            0, .9f,   1, -0.1f,  // score= 0.6
+                            0, 10,    1, 11,     // score= 0.95
+                            1, 10.1f, 0, 11.1f,  // score=  0.5
+                            1, 101,   0, 100});  // score=0.3
+
   AddInputFromArray<float>(TensorShape({6}), {.9f, .75f, .6f, .95f, .5f, .3f});
   AddInputFromArray<int>(TensorShape({}), {3});
   AddInputFromArray<float>(TensorShape({}), {.5f});
@@ -407,7 +413,8 @@ TEST_F(NonMaxSuppressionV2GPUOpTest,
   test::ExpectTensorEqual<int>(expected, *GetOutput(0));
 }
 
-TEST_F(NonMaxSuppressionV2GPUOpTest, TestSelectAtMostTwoBoxesFromThreeClusters) {
+TEST_F(NonMaxSuppressionV2GPUOpTest,
+       TestSelectAtMostTwoBoxesFromThreeClusters) {
   MakeOp();
   AddInputFromArray<float>(
       TensorShape({6, 4}),
