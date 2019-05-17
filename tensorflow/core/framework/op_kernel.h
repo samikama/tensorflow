@@ -79,37 +79,37 @@ class ScopedStepContainer;
 class CollectiveExecutor;
 class StepStatsCollectorInterface;
 
-class OpKernel {
+class OpKernelBase {
  public:
   // OpKernel won't be instantiated by the scheduler, so you may perform
   // expensive initialization in the descendant's constructor.
-  explicit OpKernel(OpKernelConstruction* context);
+  OpKernelBase(OpKernelConstruction* context);
 
   // Specialized constructor that enables the descendant to provide a different
   // `NodeDef` value. For example, this constructor can be used to provide a
   // stripped-down `NodeDef` that does not contain the full set of attrs (such
   // as tensor values) if the descendant stores them in a different form.
-  explicit OpKernel(OpKernelConstruction* context,
+  OpKernelBase(OpKernelConstruction* context,
                     std::unique_ptr<const NodeDef> node_def);
 
-  virtual ~OpKernel();
+  virtual ~OpKernelBase();
 
-  // An OpKernel's computation can be either synchronous or
-  // asynchronous. All OpKernel Compute() methods must be thread-safe as they
+  // An OpKernelBase's computation can be either synchronous or
+  // asynchronous. All OpKernelBase Compute() methods must be thread-safe as they
   // may be called concurrently (e.g. by multiple executions of the same graph
   // concurrently).
   //
-  // Most OpKernels should compute synchronously. They should
-  // subclass OpKernel and override the Compute() method and have it
+  // Most OpKernelBases should compute synchronously. They should
+  // subclass OpKernelBase and override the Compute() method and have it
   // return after completing the supplied work.
   //
-  // A synchronous OpKernel *MUST NOT* block the calling thread on a
+  // A synchronous OpKernelBase *MUST NOT* block the calling thread on a
   // synchronization mechanism (condition variable, Notification, etc.) that
-  // will be unblocked by the execution of another OpKernel. Execution may
+  // will be unblocked by the execution of another OpKernelBase. Execution may
   // deadlock in that case, because the executor may use a bounded number of
   // threads.
   //
-  // If an OpKernel must block on the execution of another OpKernel (e.g. a
+  // If an OpKernelBase must block on the execution of another OpKernelBase (e.g. a
   // RecvOp, or a DequeueOp), the implementation *MUST* subclass AsyncOpKernel,
   // and override `AsyncOpKernel::ComputeAsync()`. In addition, because the
   // unblocking kernel may never run (due to an error or cancellation), in most
@@ -125,6 +125,12 @@ class OpKernel {
   //
   // "context" is guaranteed to be alive until Compute() returns.
   virtual void Compute(OpKernelContext* context) = 0;
+
+  // Synchronous compute.
+  //
+  // "context" is guaranteed to be alive until Compute() returns.
+  void sysCompute(OpKernelContext* context){Compute(context);};
+
 
   // Returns nullptr iff this op kernel is synchronous.
   virtual AsyncOpKernel* AsAsync() { return nullptr; }
@@ -222,10 +228,23 @@ class OpKernel {
   bool expensive_;
   std::atomic_uint_fast64_t cost_estimate_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(OpKernel);
+  TF_DISALLOW_COPY_AND_ASSIGN(OpKernelBase);
 };
 
-class AsyncOpKernel : public OpKernel {
+class OpKernel:public OpKernelBase{
+  public:
+  explicit OpKernel(OpKernelConstruction* context):OpKernelBase(context){};
+
+  // Specialized constructor that enables the descendant to provide a different
+  // `NodeDef` value. For example, this constructor can be used to provide a
+  // stripped-down `NodeDef` that does not contain the full set of attrs (such
+  // as tensor values) if the descendant stores them in a different form.
+  explicit OpKernel(OpKernelConstruction* context,
+                    std::unique_ptr<const NodeDef> node_def):OpKernelBase(context,std::move(node_def)){};
+
+};
+
+class OpKernelAsyncBase : public OpKernel {
  public:
   using OpKernel::OpKernel;  // Lift OpKernel constructors.
 
@@ -246,12 +265,24 @@ class AsyncOpKernel : public OpKernel {
   // to `done`.
   typedef std::function<void()> DoneCallback;
   virtual void ComputeAsync(OpKernelContext* context, DoneCallback done) = 0;
-
-  AsyncOpKernel* AsAsync() final { return this; }
-  const AsyncOpKernel* AsAsync() const final { return this; }
+  AsyncOpKernel* AsAsync();
+  const AsyncOpKernel* AsAsync() const;
 
   void Compute(OpKernelContext* context) final;
+  void SysComputeAsync(OpKernelContext* context, DoneCallback done){
+    ComputeAsync(context,done);
+  }
 };
+
+class AsyncOpKernel : public OpKernelAsyncBase {
+  public:
+  using OpKernelAsyncBase::OpKernelAsyncBase;  // Lift OpKernel constructors.
+  AsyncOpKernel* AsAsync() final { return this; }
+  const AsyncOpKernel* AsAsync() const final { return this; }
+};
+
+  AsyncOpKernel* OpKernelAsyncBase::AsAsync()  { return dynamic_cast<AsyncOpKernel*>(this); }
+  const AsyncOpKernel* OpKernelAsyncBase::AsAsync() const { return dynamic_cast<const AsyncOpKernel*>(this); }
 
 // Wraps a tensor that is held by an Op across calls to Compute(). For
 // memory safety when using asynchronous devices like GPUs, the system
