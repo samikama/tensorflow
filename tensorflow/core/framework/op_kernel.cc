@@ -85,12 +85,12 @@ Status MatchSignatureHelper(const DataTypeSlice expected_inputs,
 
 }  // namespace
 
-// OpKernel ------------------------------------------------------------------
+// OpKernelBase ------------------------------------------------------------------
 
-OpKernel::OpKernel(OpKernelConstruction* context)
-    : OpKernel(context, MakeUnique<const NodeDef>(context->def())) {}
+OpKernelBase::OpKernelBase(OpKernelBaseConstruction* context)
+    : OpKernelBase(context, MakeUnique<const NodeDef>(context->def())) {}
 
-OpKernel::OpKernel(OpKernelConstruction* context,
+OpKernelBase::OpKernelBase(OpKernelConstruction* context,
                    std::unique_ptr<const NodeDef> node_def)
     : def_(std::move(node_def)),
       input_types_(context->input_types().begin(),
@@ -105,7 +105,7 @@ OpKernel::OpKernel(OpKernelConstruction* context,
       output_name_map_(context->num_outputs()),
       graph_def_version_(context->graph_def_version()),
       is_internal_(str_util::StartsWith(type_string(), "_")),
-      cost_estimate_(OpKernel::kInitialCostEstimateCycles) {
+      cost_estimate_(OpKernelBase::kInitialCostEstimateCycles) {
   OP_REQUIRES_OK(context,
                  NameRangesForNode(*def_, *context->op_def_, &input_name_map_,
                                    &output_name_map_));
@@ -118,24 +118,24 @@ OpKernel::OpKernel(OpKernelConstruction* context,
                context->device_type() != DeviceType(DEVICE_SYCL);
 }
 
-OpKernel::~OpKernel() {}
+OpKernelBase::~OpKernelBase() {}
 
-const uint64 OpKernel::kInitialCostEstimateCycles;
-const uint64 OpKernel::kOpIsExpensiveThresholdCycles;
-const uint64 OpKernel::kCostDecay;
+const uint64 OpKernelBase::kInitialCostEstimateCycles;
+const uint64 OpKernelBase::kOpIsExpensiveThresholdCycles;
+const uint64 OpKernelBase::kCostDecay;
 
-const string& OpKernel::name() const { return def_->name(); }
-const string& OpKernel::type_string() const { return def_->op(); }
-const string& OpKernel::requested_device() const { return def_->device(); }
-const string& OpKernel::requested_input(int i) const { return def_->input(i); }
+const string& OpKernelBase::name() const { return def_->name(); }
+const string& OpKernelBase::type_string() const { return def_->op(); }
+const string& OpKernelBase::requested_device() const { return def_->device(); }
+const string& OpKernelBase::requested_input(int i) const { return def_->input(i); }
 
 // This static function exists only because device_attributes.pb.h is
 // already included here, and it can't be introduced elsewhere.
-/*static*/ int OpKernel::DeviceNumaNode(const DeviceBase* device) {
+/*static*/ int OpKernelBase::DeviceNumaNode(const DeviceBase* device) {
   return device->attributes().locality().numa_node();
 }
 
-Status OpKernel::InputRange(StringPiece input_name, int* start,
+Status OpKernelBase::InputRange(StringPiece input_name, int* start,
                             int* stop) const {
   const auto result = input_name_map_.find(input_name);
   if (result == input_name_map_.end()) {
@@ -147,7 +147,7 @@ Status OpKernel::InputRange(StringPiece input_name, int* start,
   }
 }
 
-Status OpKernel::OutputRange(StringPiece output_name, int* start,
+Status OpKernelBase::OutputRange(StringPiece output_name, int* start,
                              int* stop) const {
   const auto result = output_name_map_.find(output_name);
   if (result == output_name_map_.end()) {
@@ -159,7 +159,7 @@ Status OpKernel::OutputRange(StringPiece output_name, int* start,
   }
 }
 
-Status OpKernel::MakeShape(const Tensor& shape, TensorShape* out) const {
+Status OpKernelBase::MakeShape(const Tensor& shape, TensorShape* out) const {
   if (!IsLegacyVector(shape.shape())) {
     return errors::InvalidArgument(
         "shape must be a vector of {int32,int64}, got shape ",
@@ -176,7 +176,7 @@ Status OpKernel::MakeShape(const Tensor& shape, TensorShape* out) const {
   }
 }
 
-void AsyncOpKernel::Compute(OpKernelContext* context) {
+void OpKernelAsyncBase::Compute(OpKernelContext* context) {
   Notification n;
   ComputeAsync(context, [&n]() { n.Notify(); });
   n.WaitForNotification();
