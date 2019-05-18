@@ -3331,6 +3331,7 @@ tf_cuda_library(
         "//tensorflow/core/profiler/lib:traceme",
         "//tensorflow/core/profiler/internal:traceme_recorder",
     ] + mkl_deps(),
+    cuda_deps = ["@local_config_cuda//cuda:cuda"],
     alwayslink = 1,
 )
 

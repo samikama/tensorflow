@@ -676,6 +676,13 @@ def _find_libs(repository_ctx, cuda_config):
             cuda_config.config["cuda_library_dir"],
             cuda_config.cuda_lib_version,
         ),
+        "nvToolsExt": _find_cuda_lib(
+            "nvToolsExt",
+            repository_ctx,
+            cpu_value,
+            cuda_config.config["cuda_library_dir"],
+            "1",
+        ),
     }
 
 def _cudart_static_linkopt(cpu_value):
@@ -1084,6 +1091,7 @@ def _create_local_cuda_repository(repository_ctx):
             "%{curand_lib}": cuda_libs["curand"].basename,
             "%{cupti_lib}": cuda_libs["cupti"].basename,
             "%{cusparse_lib}": cuda_libs["cusparse"].basename,
+            "%{nvtx_lib}": cuda_libs["nvToolsExt"].basename,
             "%{copy_rules}": "\n".join(copy_rules),
         },
         "cuda/BUILD",
