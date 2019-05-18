@@ -591,7 +591,7 @@ void BaseGPUDevice::ComputeHelper(OpKernel* op_kernel,
     }
   }
   ScopedActivateExecutorContext scoped_activation{stream->parent()};
-  op_kernel->Compute(context);
+  op_kernel->SysCompute(context);
   if (context->status().ok()) {
     if (sync_every_op_) {
       // Note: GPUUtil::Sync() only syncs the default stream.
@@ -663,7 +663,7 @@ void BaseGPUDevice::ComputeAsync(AsyncOpKernel* op_kernel,
       },
       profiler::GetTFTraceMeLevel(op_kernel->IsExpensive()));
   ScopedActivateExecutorContext scoped_activation{stream->parent()};
-  op_kernel->ComputeAsync(context, done);
+  op_kernel->SysComputeAsync(context, done);
 }
 
 Status BaseGPUDevice::MaybeCopyTensorToGPU(

@@ -128,6 +128,13 @@ cc_library(
 )
 
 cc_library(
+    name = "nvTools",
+    srcs = ["cuda/lib/%{nvtx_lib}"],
+    data = ["cuda/lib/%{nvtx_lib}"],
+    linkstatic = 1,
+)
+
+cc_library(
     name = "cuda",
     deps = [
         ":cublas",
@@ -136,6 +143,7 @@ cc_library(
         ":cudnn",
         ":cufft",
         ":curand",
+        ":nvTools",
     ],
 )
 
