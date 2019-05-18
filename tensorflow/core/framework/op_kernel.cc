@@ -87,13 +87,14 @@ Status MatchSignatureHelper(const DataTypeSlice expected_inputs,
 
 }  // namespace
 
-// OpKernelBase ------------------------------------------------------------------
+// OpKernelBase
+// ------------------------------------------------------------------
 
-OpKernelBase::OpKernelBase(OpKernelBaseConstruction* context)
+OpKernelBase::OpKernelBase(OpKernelConstruction* context)
     : OpKernelBase(context, MakeUnique<const NodeDef>(context->def())) {}
 
 OpKernelBase::OpKernelBase(OpKernelConstruction* context,
-                   std::unique_ptr<const NodeDef> node_def)
+                           std::unique_ptr<const NodeDef> node_def)
     : def_(std::move(node_def)),
       input_types_(context->input_types().begin(),
                    context->input_types().end()),
@@ -128,7 +129,9 @@ const uint64 OpKernelBase::kCostDecay;
 const string& OpKernelBase::name() const { return def_->name(); }
 const string& OpKernelBase::type_string() const { return def_->op(); }
 const string& OpKernelBase::requested_device() const { return def_->device(); }
-const string& OpKernelBase::requested_input(int i) const { return def_->input(i); }
+const string& OpKernelBase::requested_input(int i) const {
+  return def_->input(i);
+}
 
 // This static function exists only because device_attributes.pb.h is
 // already included here, and it can't be introduced elsewhere.
@@ -137,7 +140,7 @@ const string& OpKernelBase::requested_input(int i) const { return def_->input(i)
 }
 
 Status OpKernelBase::InputRange(StringPiece input_name, int* start,
-                            int* stop) const {
+                                int* stop) const {
   const auto result = input_name_map_.find(input_name);
   if (result == input_name_map_.end()) {
     return errors::InvalidArgument("Unknown input name: ", input_name);
@@ -149,7 +152,7 @@ Status OpKernelBase::InputRange(StringPiece input_name, int* start,
 }
 
 Status OpKernelBase::OutputRange(StringPiece output_name, int* start,
-                             int* stop) const {
+                                 int* stop) const {
   const auto result = output_name_map_.find(output_name);
   if (result == output_name_map_.end()) {
     return errors::InvalidArgument("Unknown output name: ", output_name);
@@ -177,10 +180,25 @@ Status OpKernelBase::MakeShape(const Tensor& shape, TensorShape* out) const {
   }
 }
 
+//--------- Trampoline function for instrumentation!
+void OpKernelBase::SysCompute(OpKernelContext* context){
+  Compute(context);
+}
+// -- OpKernelAsyncBase -------------------
+void OpKernelAsyncBase::SysComputeAsync(OpKernelContext* context, DoneCallback done){
+    ComputeAsync(context,done);
+  }
 void OpKernelAsyncBase::Compute(OpKernelContext* context) {
   Notification n;
   ComputeAsync(context, [&n]() { n.Notify(); });
   n.WaitForNotification();
+}
+
+AsyncOpKernel* OpKernelAsyncBase::AsAsync() {
+  return dynamic_cast<AsyncOpKernel*>(this);
+}
+const AsyncOpKernel* OpKernelAsyncBase::AsAsync() const {
+  return dynamic_cast<const AsyncOpKernel*>(this);
 }
 
 // PersistentTensor ----------------------------------------------------------

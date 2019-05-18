@@ -129,7 +129,7 @@ class OpKernelBase {
   // Synchronous compute.
   //
   // "context" is guaranteed to be alive until Compute() returns.
-  void sysCompute(OpKernelContext* context){Compute(context);};
+  void SysCompute(OpKernelContext* context);
 
 
   // Returns nullptr iff this op kernel is synchronous.
@@ -269,9 +269,7 @@ class OpKernelAsyncBase : public OpKernel {
   const AsyncOpKernel* AsAsync() const;
 
   void Compute(OpKernelContext* context) final;
-  void SysComputeAsync(OpKernelContext* context, DoneCallback done){
-    ComputeAsync(context,done);
-  }
+  void SysComputeAsync(OpKernelContext* context, DoneCallback done);
 };
 
 class AsyncOpKernel : public OpKernelAsyncBase {
@@ -281,8 +279,6 @@ class AsyncOpKernel : public OpKernelAsyncBase {
   const AsyncOpKernel* AsAsync() const final { return this; }
 };
 
-  AsyncOpKernel* OpKernelAsyncBase::AsAsync()  { return dynamic_cast<AsyncOpKernel*>(this); }
-  const AsyncOpKernel* OpKernelAsyncBase::AsAsync() const { return dynamic_cast<const AsyncOpKernel*>(this); }
 
 // Wraps a tensor that is held by an Op across calls to Compute(). For
 // memory safety when using asynchronous devices like GPUs, the system
@@ -440,7 +436,7 @@ class OpKernelConstruction {
 
   // Allow op_def_ across from OpKernel, but not from subclasses.
   // TODO(irving): Remove protos from this header entirely.
-  friend class OpKernel;
+  friend class OpKernelBase;
 
   TF_DISALLOW_COPY_AND_ASSIGN(OpKernelConstruction);
 };
