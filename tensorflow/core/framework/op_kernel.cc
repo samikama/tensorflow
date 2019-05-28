@@ -186,7 +186,7 @@ void OpKernelBase::SysCompute(OpKernelContext* context){
 }
 // -- OpKernelAsyncBase -------------------
 void OpKernelAsyncBase::SysComputeAsync(OpKernelContext* context, DoneCallback done){
-    ComputeAsync(context,done);
+    ComputeAsync(context,std::move(done));
   }
 void OpKernelAsyncBase::Compute(OpKernelContext* context) {
   Notification n;
