@@ -104,13 +104,18 @@ void IntraProcessRendezvous::SameWorkerRecvDone(
                           recv_args.alloc_attrs.gpu_compatible());
   Allocator* out_allocator = dst_device->GetAllocator(attr);
   bool sync_dst_compute = true;
+  int stream_id=0;
+  if(recv_args.device_context){
+    stream_id=recv_args.device_context->GetStreamId();
+  }
   if (in.dtype() != DT_VARIANT) {
     // Variants are handled by CopyTensor::ViaDMA.
     AllocationAttributes aa;
-    uint64 safe_alloc_frontier = dst_device->SafeAllocFrontier(0);
+    aa.requested_stream=stream_id;
+    uint64 safe_alloc_frontier = dst_device->SafeAllocFrontier(0,stream_id);
     std::function<uint64()> freed_by_func = [dst_device,
-                                             &safe_alloc_frontier]() {
-      safe_alloc_frontier = dst_device->SafeAllocFrontier(safe_alloc_frontier);
+                                             &safe_alloc_frontier,stream_id]() {
+      safe_alloc_frontier = dst_device->SafeAllocFrontier(safe_alloc_frontier,stream_id);
       return safe_alloc_frontier;
     };
     if (parsed.dst.type == "GPU" && safe_alloc_frontier > 0) {

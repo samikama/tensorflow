@@ -209,6 +209,7 @@ struct KernelTimer {
   }
 };
 
+
 struct NodeItem {
   NodeItem() {}
 
@@ -1752,6 +1753,7 @@ void ExecutorState::Process(TaggedNode tagged_node, int64 scheduled_nsec) {
     // Set the device_context for this node id, if it exists.
     if (id < device_context_map_.size()) {
       params.op_device_context = device_context_map_[id];
+
     }
 
     params.track_allocations = false;

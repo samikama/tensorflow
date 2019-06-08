@@ -43,6 +43,7 @@ class GPUBFCAllocator : public BFCAllocator {
 
  private:
   static bool GetAllowGrowthValue(const GPUOptions& gpu_options);
+  static int  GetMaxStreams(const GPUOptions& gpu_options);
 };
 
 }  // namespace tensorflow

@@ -33,21 +33,19 @@ class GPUDeviceContext : public DeviceContext {
                    se::Stream* host_to_device_stream,
                    se::Stream* device_to_host_stream,
                    gtl::InlinedVector<se::Stream*, 4> device_to_device_stream)
-      : stream_id_(stream_id),
-        stream_(stream),
+      : stream_(stream),
         host_to_device_stream_(host_to_device_stream),
         device_to_host_stream_(device_to_host_stream),
-        device_to_device_stream_(device_to_device_stream) {}
+        device_to_device_stream_(device_to_device_stream) {stream_id_=stream_id;}
 
   ~GPUDeviceContext() override {}
-
+  int stream_id() const {return GetStreamId();}
   se::Stream* stream() const override { return stream_; }
   se::Stream* host_to_device_stream() const { return host_to_device_stream_; }
   se::Stream* device_to_host_stream() const { return device_to_host_stream_; }
   se::Stream* device_to_device_stream(int index) const {
     return device_to_device_stream_[index % device_to_device_stream_.size()];
   }
-  int stream_id() const { return stream_id_; }
 
   void CopyCPUTensorToDevice(const Tensor* cpu_tensor, Device* device,
                              Tensor* device_tensor, StatusCallback done,
@@ -68,7 +66,6 @@ class GPUDeviceContext : public DeviceContext {
                      std::function<void()> func) override;
 
  private:
-  int stream_id_;
   // The default primary stream to use for this context.
   // All the memory belongs to this stream.
   se::Stream* stream_;

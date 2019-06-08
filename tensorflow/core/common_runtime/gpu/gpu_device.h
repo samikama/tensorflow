@@ -125,7 +125,7 @@ class BaseGPUDevice : public LocalDevice {
 
   // If returned value is > 0 then GPU Memory chunks freed before this count
   // are guaranteed not to be in use by any kernel pending on this device.
-  uint64 SafeAllocFrontier(uint64 old_value) override;
+  uint64 SafeAllocFrontier(uint64 old_value, int stream_id) override;
 
   // Returns the number of kernels that have been queued for execution on
   // the compute stream and are not yet known to have completed.
@@ -208,18 +208,29 @@ class GPUKernelTracker {
   // by the allocator because allocators are initialized once per process.
   // Devices are per-session.
   explicit GPUKernelTracker(const Params& params, Env* env,
-                            se::Stream* compute_stream,
+                            std::vector<se::Stream*> compute_streams,
                             SharedCounter* timing_counter, Allocator* allocator,
-                            EventMgr* event_manager)
+                            EventMgr* event_manager, int max_streams)
       : params_(params),
         env_(env),
-        stream_(compute_stream),
+        stream_(compute_streams),
         timing_counter_(timing_counter),
         allocator_(allocator),
         em_(event_manager),
+        last_terminated_count_(max_streams),
         pending_kernels_(
-            params.max_pending > 0 ? std::max(8, 2 * params.max_pending) : 64) {
+            params.max_pending > 0 ? std::max(8, 2 * params.max_pending) : 64),
+        free_slots_(params.max_pending > 0 ? std::max(8, 2 * params.max_pending)
+                                           : 64),
+        last_completed_(max_streams) {
     mem_since_last_ = 0;
+    for(int i=0;i<free_slots_.size();i++){
+      free_slots_[i]=i;
+    }
+    for(int i=0;i<max_streams;++i){
+      last_completed_[i]=-1;
+    }
+    num_slots_available_=free_slots_.size();
     if (!timing_counter_) {
       // There's not a preexisting counter owned by GPUProcessState, i.e.
       // pending_cap > 0 but timestamped_allocator == false.
@@ -231,27 +242,27 @@ class GPUKernelTracker {
   // Determine whether a GPU kernel should have a recording event queued
   // immediately afterwards.  If so, advance the counter and return the new
   // counter value after enqueuing.
-  uint64 MaybeQueue(OpKernelContext* ctx);
+  uint64 MaybeQueue(OpKernelContext* ctx, int stream_id = 0);
 
   // Record that a GPU kernel has just been enqueued on the compute stream.
   // Inserts the supplied counter value in a new PendingKernel record appended
   // to the end of the ring buffer then returns that same count.
   // Caller is responsible for ensuring that RecordTerminate() is eventually
   // called with the same counter value.
-  void RecordQueued(uint64 queued_count, int weight)
+  void RecordQueued(uint64 queued_count, int weight, int stream_id=0)
       EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   // Takes a count value returned by RecordQueued and finds the corresponding
   // PendingKernel record in the ring buffer.  Marks the kernel as completed and
   // advances the completion frontier accordingly.
-  void RecordTerminated(uint64 queued_count);
+  void RecordTerminated(uint64 queued_count,int stream_id =0);
 
   // Returns the largest timing count such that all kernels queued no
   // later than that count are known to have terminated.
-  inline uint64 LastTerminatedCount(uint64 old_value) {
-    uint64 new_value = last_terminated_count_.load(std::memory_order_relaxed);
+  inline uint64 LastTerminatedCount(uint64 old_value,int stream_id=0) {
+    uint64 new_value = last_terminated_count_[stream_id].load(std::memory_order_relaxed);
     if (new_value == old_value) {
-      MaybeQueueProgressEvent();
+      MaybeQueueProgressEvent(stream_id);
     }
     return new_value;
   }
@@ -277,39 +288,45 @@ class GPUKernelTracker {
   friend class GPUKernelTrackerTest;
   Params params_;
   Env* env_;
-  se::Stream* stream_;
+  std::vector<se::Stream*> stream_;
   SharedCounter* timing_counter_;
   std::unique_ptr<SharedCounter> owned_counter_;
   Allocator* allocator_ = nullptr;
   EventMgr* em_ = nullptr;
-  std::atomic<uint64> last_terminated_count_ = {1};
+  std::vector<std::atomic<uint64>> last_terminated_count_;
 
-  void MaybeQueueProgressEvent();
+  void MaybeQueueProgressEvent(int stream_id=0);
 
   // Records when a kernel was queued for execution.  Kernel launches are
   // identified by a unique count value from a per-GPU device timing counter.
   struct PendingKernel {
     uint64 queued_count;
     int weight;
+    int stream_id;
     bool terminated;
     PendingKernel(const PendingKernel& pk)
         : queued_count(pk.queued_count),
-          weight(pk.weight),
+          weight(pk.weight),stream_id(pk.stream_id),
           terminated(pk.terminated) {}
-    PendingKernel() : queued_count(0), weight(0), terminated(false) {}
+    PendingKernel() : queued_count(0), weight(0), stream_id(-1),terminated(false) {}
   };
   mutex mu_;
   int32 mem_since_last_ GUARDED_BY(mu_);
   int32 ops_since_last_ GUARDED_BY(mu_);
   // Ring buffer of PendingKernel records.
   std::vector<PendingKernel> pending_kernels_ GUARDED_BY(mu_);
+  // Free slots on ring buffer;
+  std::vector<size_t> free_slots_ GUARDED_BY(mu_);
+  // Slot depth;
+  int num_slots_available_ GUARDED_BY(mu_) = 0;
+
   // Next unused slot in pending_kernels_.
   int first_available_ GUARDED_BY(mu_) = 0;
   // Last completed PendingKernel such that all prior PendingKernels are
   // also completed.  With out-of-order completion there may be a mixture
   // of completed and uncompleted entries between last_completed_ and
   // first_available_.
-  int last_completed_ GUARDED_BY(mu_) = -1;
+  std::vector<int> last_completed_ GUARDED_BY(mu_) ;
   // Sum of weights of the outstanding events marking tracked kernels.
   int num_pending_ GUARDED_BY(mu_) = 0;
   condition_variable pending_decreased_ GUARDED_BY(mu_);

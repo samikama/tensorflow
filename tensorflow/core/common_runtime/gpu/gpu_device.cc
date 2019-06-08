@@ -33,7 +33,6 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "tensorflow/core/common_runtime/device_factory.h"
 #include "tensorflow/core/common_runtime/gpu/gpu_device.h"
 #include "tensorflow/core/common_runtime/gpu/gpu_event_mgr.h"
@@ -60,6 +59,7 @@ limitations under the License.
 #include "tensorflow/core/lib/strings/numbers.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
+#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #if GOOGLE_CUDA
 #include "tensorflow/core/platform/cuda.h"
 #elif TENSORFLOW_USE_ROCM
@@ -223,7 +223,7 @@ class EigenGpuStreamDevice : public ::Eigen::StreamInterface {
   OpKernelContext* context_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(EigenGpuStreamDevice);
-};
+};  // namespace tensorflow
 
 // This factory helps to ensure that different GPU device objects that refer to
 // the same physical device and stream group id use the same stream group
@@ -311,7 +311,7 @@ BaseGPUDevice::BaseGPUDevice(const SessionOptions& options, const string& name,
       scoped_allocator_mgr_(new ScopedAllocatorMgr(name)),
       tf_gpu_id_(tf_gpu_id),
       sync_every_op_(sync_every_op),
-      max_streams_(max_streams) {
+      max_streams_(max_streams){
   GPUProcessState::singleton()->EnableGPUDevice();
 }
 
@@ -373,6 +373,7 @@ Status BaseGPUDevice::Init(const SessionOptions& options) {
     device_contexts_.push_back(new GPUDeviceContext(
         i, streams_.back()->compute, streams_.back()->host_to_device,
         streams_.back()->device_to_host, streams_.back()->device_to_device));
+
   }
 
   em_ = EventMgrFactory::Singleton()->GetEventMgr(executor_,
@@ -388,11 +389,11 @@ Status BaseGPUDevice::Init(const SessionOptions& options) {
   if (timestamped_allocator_ ||
       (tracker_params.max_interval > 0 || tracker_params.max_bytes > 0 ||
        tracker_params.max_pending > 0)) {
-    if (max_streams_ > 1) {
-      LOG(FATAL) << "max_streams > 1 was specified together with "
-                    "timestamped_allocator and/or kernel tracking.  This is an "
-                    "unsupported combination.";
-    }
+    // if (max_streams_ > 1) {
+    //   LOG(FATAL) << "max_streams > 1 was specified together with "
+    //                 "timestamped_allocator and/or kernel tracking.  This is an "
+    //                 "unsupported combination.";
+    // }
     SharedCounter* timing_counter = nullptr;
     if (timestamped_allocator_) {
       // In this case the SharedCounter was already created and set in the
@@ -403,9 +404,13 @@ Status BaseGPUDevice::Init(const SessionOptions& options) {
           GPUProcessState::singleton()->GPUAllocatorCounter(tf_gpu_id_);
       DCHECK(timing_counter);
     }
+    std::vector<se::Stream*> compute_streams;
+    for(const auto& s:streams_){
+      compute_streams.push_back(s->compute);
+    }
     kernel_tracker_.reset(new GPUKernelTracker(
-        tracker_params, Env::Default(), streams_[0]->compute, timing_counter,
-        timestamped_allocator_ ? gpu_allocator_ : nullptr, em_));
+        tracker_params, Env::Default(), std::move(compute_streams), timing_counter,
+        timestamped_allocator_ ? gpu_allocator_ : nullptr, em_,max_streams_));
   }
 
   gpu_device_info_ = new GpuDeviceInfo;
@@ -476,7 +481,7 @@ bool BaseGPUDevice::RequiresRecordingAccessedTensors() const {
 
 Status BaseGPUDevice::FillContextMap(const Graph* graph,
                                      DeviceContextMap* device_context_map) {
-  VLOG(2) << "FillContextMap";
+  VLOG(2) << "FillContextMap streams_.size()= " << streams_.size();
 
   const size_t num_streams = streams_.size();
   // Special case for single stream.
@@ -597,10 +602,10 @@ void BaseGPUDevice::Compute(OpKernel* op_kernel, OpKernelContext* context) {
     if (kernel_tracker_) {
       GPUKernelTracker* tracker = kernel_tracker_.get();
       DCHECK(tracker);
-      uint64 queued_count = tracker->MaybeQueue(context);
+      uint64 queued_count = tracker->MaybeQueue(context,stream_id);
       if (queued_count > 0) {
-        em_->ThenExecute(stream, [tracker, queued_count]() {
-          tracker->RecordTerminated(queued_count);
+        em_->ThenExecute(stream, [tracker, queued_count,stream_id]() {
+          tracker->RecordTerminated(queued_count,stream_id);
         });
       }
     }
@@ -660,9 +665,12 @@ Status BaseGPUDevice::MaybeCopyTensorToGPU(
       return err;
     }
     AllocationAttributes allocation_attr;
+    allocation_attr.requested_stream = alloc_attrs.stream_id;
+    int stream_id = alloc_attrs.stream_id;
     uint64 safe_alloc_frontier = 0;
-    std::function<uint64()> freed_by_func = [this, &safe_alloc_frontier]() {
-      safe_alloc_frontier = SafeAllocFrontier(safe_alloc_frontier);
+    std::function<uint64()> freed_by_func = [this, &safe_alloc_frontier,
+                                             stream_id]() {
+      safe_alloc_frontier = SafeAllocFrontier(safe_alloc_frontier, stream_id);
       return safe_alloc_frontier;
     };
     if (timestamped_allocator_) {
@@ -1518,7 +1526,8 @@ struct CudaVersion {
 };
 
 std::vector<CudaVersion> supported_cuda_compute_capabilities = {
-    TF_CUDA_CAPABILITIES,};
+    TF_CUDA_CAPABILITIES,
+};
 
 std::vector<CudaVersion> GetSupportedCudaComputeCapabilities() {
   auto cuda_caps = supported_cuda_compute_capabilities;
@@ -1749,7 +1758,7 @@ Status BaseGPUDeviceFactory::GetValidDeviceIds(
   return Status::OK();
 }
 
-uint64 BaseGPUDevice::SafeAllocFrontier(uint64 old_value) {
+uint64 BaseGPUDevice::SafeAllocFrontier(uint64 old_value, int stream_id) {
   if (timestamped_allocator_) {
     return kernel_tracker_->LastTerminatedCount(old_value);
   } else {
@@ -1764,7 +1773,7 @@ int BaseGPUDevice::PendingKernels() {
   return 0;
 }
 
-uint64 GPUKernelTracker::MaybeQueue(OpKernelContext* ctx) {
+uint64 GPUKernelTracker::MaybeQueue(OpKernelContext* ctx, int stream_id) {
   mutex_lock l(mu_);
   ++ops_since_last_;
   int64 mem_used =
@@ -1786,46 +1795,55 @@ uint64 GPUKernelTracker::MaybeQueue(OpKernelContext* ctx) {
     ops_since_last_ = 0;
   }
   uint64 queued_count = timing_counter_->next();
-  RecordQueued(queued_count, weight);
+  RecordQueued(queued_count, weight, stream_id);
   return queued_count;
 }
 
-void GPUKernelTracker::RecordQueued(uint64 queued_count, int weight) {
+void GPUKernelTracker::RecordQueued(uint64 queued_count, int weight,
+                                    int stream_id) {
+  if (num_slots_available_ > 0) {
+    num_slots_available_--;
+    first_available_ = free_slots_[num_slots_available_];
+  }
   VLOG(2) << "RecordQueued queued_count=" << queued_count
           << " first_available_=" << first_available_
-          << " last_completed_=" << last_completed_
+          << " last_completed_=" << last_completed_[stream_id]
           << " num_pending_=" << num_pending_;
   pending_kernels_[first_available_].queued_count = queued_count;
   pending_kernels_[first_available_].weight = weight;
+  pending_kernels_[first_available_].stream_id = stream_id;
   pending_kernels_[first_available_].terminated = false;
-  ++first_available_;
   num_pending_ += weight;
-  if (first_available_ >= pending_kernels_.size()) {
-    if (last_completed_ >= 0) {
-      // wrap
-      first_available_ = 0;
-    } else {
-      // enlarge the ring buffer
-      pending_kernels_.resize(2 * pending_kernels_.size());
+  // no slots left enlarge buffer
+  if (num_slots_available_ == 0) {
+    size_t curr_size = pending_kernels_.size();
+    size_t new_size = 2 * curr_size;
+    std::vector<size_t> t(new_size);
+    for (int i = 0; i < curr_size; i++) {
+      t[i] = curr_size + i;
     }
+    free_slots_.swap(t);
+    pending_kernels_.resize(new_size);
+    num_slots_available_ = curr_size;
   }
-  if (first_available_ == last_completed_) {
-    // Ring buffer is full: double it.  All of the same valid PendingKernel
-    // entries exist after the copy, they are just shifted to begin
-    // at index 0 in the new array.
-    std::vector<PendingKernel> new_buffer(pending_kernels_.size() * 2);
-    for (int i = 0; i < pending_kernels_.size(); ++i) {
-      int j = (i + last_completed_) % pending_kernels_.size();
-      new_buffer[i] = pending_kernels_[j];
-    }
-    last_completed_ = 0;
-    first_available_ = pending_kernels_.size();
-    pending_kernels_.swap(new_buffer);
-    VLOG(1) << "last_completed_=" << last_completed_
-            << " first_available_=" << first_available_
-            << " num_pending_=" << num_pending_;
-  }
-  DCHECK_NE(first_available_, last_completed_) << "exhausted pending_kernels";
+  // if (first_available_ == last_completed_) {
+  //   // Ring buffer is full: double it.  All of the same valid PendingKernel
+  //   // entries exist after the copy, they are just shifted to begin
+  //   // at index 0 in the new array.
+  //   std::vector<PendingKernel> new_buffer(pending_kernels_.size() * 2);
+  //   for (int i = 0; i < pending_kernels_.size(); ++i) {
+  //     int j = (i + last_completed_) % pending_kernels_.size();
+  //     new_buffer[i] = pending_kernels_[j];
+  //   }
+  //   last_completed_ = 0;
+  //   first_available_ = pending_kernels_.size();
+  //   pending_kernels_.swap(new_buffer);
+  //   VLOG(1) << "last_completed_=" << last_completed_
+  //           << " first_available_=" << first_available_
+  //           << " num_pending_=" << num_pending_;
+  // }
+  // DCHECK_NE(first_available_, last_completed_) << "exhausted
+  // pending_kernels";
 }
 
 // Called by LastTerminatedCount() when new_value is equal to old_value.  This
@@ -1837,74 +1855,102 @@ void GPUKernelTracker::RecordQueued(uint64 queued_count, int weight) {
 // frontier so that this request can allocate from unrestricted (and better
 // compacted) memory.  So queue an event on the compute stream to ensure the
 // frontier does advance.
-void GPUKernelTracker::MaybeQueueProgressEvent() {
+void GPUKernelTracker::MaybeQueueProgressEvent(int stream_id) {
   mutex_lock l(mu_);
   if (num_pending_ == 0) {
     uint64 new_count = timing_counter_->next();
-    RecordQueued(new_count, 1);
-    em_->ThenExecute(stream_,
-                     [this, new_count]() { RecordTerminated(new_count); });
+    RecordQueued(new_count, 1, stream_id);
+    em_->ThenExecute(stream_[stream_id], [this, new_count, stream_id]() {
+      RecordTerminated(new_count, stream_id);
+    });
   }
 }
 
-void GPUKernelTracker::RecordTerminated(uint64 queued_count) {
+void GPUKernelTracker::RecordTerminated(uint64 queued_count, int stream_id) {
   mutex_lock l(mu_);
+  if (num_slots_available_ > 0) {
+    first_available_ = free_slots_[num_slots_available_ - 1];
+  }
   VLOG(2) << this << " RecordTerminated queued_count=" << queued_count
           << " first_available_=" << first_available_
-          << " last_completed_=" << last_completed_
+          << " last_completed_=" << last_completed_[stream_id]
           << " num_pending_=" << num_pending_ << " LC="
-          << ((last_completed_ >= 0)
-                  ? pending_kernels_[last_completed_].queued_count
-                  : -1);
-  DCHECK_NE(first_available_, last_completed_);
+          << ((last_completed_[stream_id] >= 0)
+                  ? pending_kernels_[last_completed_[stream_id]].queued_count
+                  : -1)
+          << " stream= " << stream_id;
+  // DCHECK_NE(first_available_, last_completed_);
   DCHECK_GT(num_pending_, 0);
   // Starting just past the last completed entry, find the entry with
   // this queued_count and mark it done.
-  int index = (last_completed_ + 1) % pending_kernels_.size();
-  int weight = 1;
-  while (true) {
-    if (index == first_available_) {
-      // This should never happen.
-      LOG(FATAL) << "Failed to find " << queued_count  // Crash OK
-                 << " in queue, last_completed_=" << last_completed_
-                 << " index=" << index
-                 << " first_available_=" << first_available_
-                 << " pending_kernels_.size()=" << pending_kernels_.size();
-    }
-    if (pending_kernels_[index].queued_count == queued_count) {
-      pending_kernels_[index].terminated = true;
-      weight = pending_kernels_[index].weight;
-      break;
-    }
-    index = (index + 1) % pending_kernels_.size();
-  }
-  // Next move last_completed_ forward past all completed kernels.  In theory
-  // kernels should always complete in queued order so we should be able to
-  // advance the completed frontier to the just-completed PendingKernel.  In
-  // practice we occasionally see the termination callbacks arrive out of
-  // order probably because of thread scheduling.  Eventually we may support
-  // out-of- order completion involving multple compute streams so here we
-  // follow a conservative approach and wait for every single callback to
-  // arrive before advancing the frontier.
-  while (true) {
-    int next_index = (last_completed_ + 1) % pending_kernels_.size();
-    if (next_index == first_available_) break;
-    if (pending_kernels_[next_index].terminated) {
-      last_completed_ = next_index;
-    } else {
-      break;
+  // find all kernels for this queued_count on given stream and mark them done.
+  // if this is too slow, split pending kernels to streams and use individual
+  // ring buffers for streams
+  size_t pending_size = pending_kernels_.size();
+  int weight = 0;
+  for (size_t t = 0; t < pending_size; ++t) {
+    auto& pending = pending_kernels_[t];
+    if (pending.stream_id == stream_id &&
+        pending.queued_count == queued_count) {
+      pending.terminated = true;
+      weight += pending.weight;
+      free_slots_[num_slots_available_] = t;
+      num_slots_available_++;
+      last_completed_[stream_id] = pending.queued_count;
     }
   }
-  if (last_completed_ >= 0) {
-    int64 v = pending_kernels_[last_completed_].queued_count;
-    last_terminated_count_ = v;
-    if (allocator_) {
-      allocator_->SetSafeFrontier(v);
-    }
+  if (allocator_) {
+    allocator_->SetSafeFrontier(queued_count, stream_id);
   }
-  // Last decrease num_pending before maybe waking a waiter.
   num_pending_ -= weight;
   pending_decreased_.notify_all();
+  return;
+  // int index = (last_completed_ + 1) % pending_kernels_.size();
+  // int weight = 1;
+
+  // while (true) {
+  //   if (index == first_available_) {
+  //     // This should never happen.
+  //     LOG(FATAL) << "Failed to find " << queued_count  // Crash OK
+  //                << " in queue, last_completed_=" << last_completed_
+  //                << " index=" << index
+  //                << " first_available_=" << first_available_
+  //                << " pending_kernels_.size()=" << pending_kernels_.size();
+  //   }
+  //   if (pending_kernels_[index].queued_count == queued_count) {
+  //     pending_kernels_[index].terminated = true;
+  //     weight = pending_kernels_[index].weight;
+  //     break;
+  //   }
+  //   index = (index + 1) % pending_kernels_.size();
+  // }
+  // // Next move last_completed_ forward past all completed kernels.  In theory
+  // // kernels should always complete in queued order so we should be able to
+  // // advance the completed frontier to the just-completed PendingKernel.  In
+  // // practice we occasionally see the termination callbacks arrive out of
+  // // order probably because of thread scheduling.  Eventually we may support
+  // // out-of- order completion involving multple compute streams so here we
+  // // follow a conservative approach and wait for every single callback to
+  // // arrive before advancing the frontier.
+  // while (true) {
+  //   int next_index = (last_completed_ + 1) % pending_kernels_.size();
+  //   if (next_index == first_available_) break;
+  //   if (pending_kernels_[next_index].terminated) {
+  //     last_completed_ = next_index;
+  //   } else {
+  //     break;
+  //   }
+  // }
+  // if (last_completed_ >= 0) {
+  //   int64 v = pending_kernels_[last_completed_].queued_count;
+  //   last_terminated_count_ = v;
+  //   if (allocator_) {
+  //     allocator_->SetSafeFrontier(v,stream_id);
+  //   }
+  // }
+  // // Last decrease num_pending before maybe waking a waiter.
+  // num_pending_ -= weight;
+  // pending_decreased_.notify_all();
 }
 
 }  // namespace tensorflow

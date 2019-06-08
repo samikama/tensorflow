@@ -107,6 +107,10 @@ class DeviceContext : public core::RefCounted {
                              std::function<void()> func) {
     return errors::Internal("ThenExecute not supported by device");
   }
+  virtual int GetStreamId() const { return stream_id_; }
+
+ protected:
+  int stream_id_ = 0;
 };
 
 // map[i] is the DeviceContext* for the node with id i, if i < map.size().
@@ -254,7 +258,7 @@ class DeviceBase {
   // device memory tagged with an earlier freed-at count is really unencumbered
   // by pending uses.  For this to be useful the device memory allocator must
   // be tagging deallocated memory chunks using the same counter.
-  virtual uint64 SafeAllocFrontier(uint64 old_value) { return 0; }
+  virtual uint64 SafeAllocFrontier(uint64 old_value, int stream_id) { return 0; }
 
   // Copies `input_tensor` to `output_tensor`, where both tensors are on this
   // device. This function assumes that `output_tensor` has already been

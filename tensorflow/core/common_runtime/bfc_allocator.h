@@ -47,7 +47,7 @@ class BFCAllocator : public Allocator {
  public:
   // Takes ownership of sub_allocator.
   BFCAllocator(SubAllocator* sub_allocator, size_t total_memory,
-               bool allow_growth, const string& name);
+               bool allow_growth, const string& name, int max_streams=1);
   ~BFCAllocator() override;
 
   string Name() override { return name_; }
@@ -75,14 +75,14 @@ class BFCAllocator : public Allocator {
 
   void SetTimingCounter(SharedCounter* sc) { timing_counter_ = sc; }
 
-  void SetSafeFrontier(uint64 count) override;
+  void SetSafeFrontier(uint64 count, int stream_id=0) override;
 
  private:
   struct Bin;
 
   void* AllocateRawInternal(size_t alignment, size_t num_bytes,
                             bool dump_log_on_failure,
-                            uint64 freed_before_count);
+                            uint64 freed_before_count,int stream_id=0);
 
   void* AllocateRawInternalWithRetry(
       size_t alignment, size_t num_bytes,
@@ -104,7 +104,7 @@ class BFCAllocator : public Allocator {
   // unsafe merged chunks adopt the most conservative timestamp from their
   // constituents so they're only useful for allocations not requiring a
   // particular timestamp.
-  bool MergeTimestampedChunks(size_t required_bytes)
+  bool MergeTimestampedChunks(size_t required_bytes,int stream_id=0)
       EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   // A ChunkHandle is an index into the chunks_ vector in BFCAllocator
@@ -162,6 +162,9 @@ class BFCAllocator : public Allocator {
 
     // Optional count when this chunk was most recently made free.
     uint64 freed_at_count = 0;
+    
+    // Optional allocated stream
+    int stream_id_=0;
 
     bool in_use() const { return allocation_id != -1; }
 
@@ -357,7 +360,7 @@ class BFCAllocator : public Allocator {
   // Returns a pointer to an underlying allocated chunk of size
   // 'rounded_bytes'.
   void* FindChunkPtr(BinNum bin_num, size_t rounded_bytes, size_t num_bytes,
-                     uint64 freed_before) EXCLUSIVE_LOCKS_REQUIRED(lock_);
+                     uint64 freed_before,int stream_id) EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   // Splits the chunk specified by 'h' into two chunks, one at least
   // of size 'num_bytes'.
@@ -400,7 +403,7 @@ class BFCAllocator : public Allocator {
 
   void MarkFree(ChunkHandle h) EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
-  ChunkHandle TryToCoalesce(ChunkHandle h, bool ignore_freed_at)
+  ChunkHandle TryToCoalesce(ChunkHandle h, bool ignore_freed_at ,bool ignore_stream=true)
       EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   // Information about a Bin that is useful for debugging.
@@ -474,7 +477,7 @@ class BFCAllocator : public Allocator {
   SharedCounter* timing_counter_ = nullptr;
   std::deque<ChunkHandle> timestamped_chunks_;
 
-  std::atomic<uint64> safe_frontier_ = {0};
+  std::vector<std::atomic<uint64>> safe_frontier_;
 
   // Structures mutable after construction
   mutable mutex lock_;

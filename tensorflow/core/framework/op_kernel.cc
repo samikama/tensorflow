@@ -730,10 +730,16 @@ Status OpKernelContext::allocate_tensor(
     DataType type, const TensorShape& shape, Tensor* out_tensor,
     AllocatorAttributes attr, const AllocationAttributes& allocation_attr) {
   Allocator* a = get_allocator(attr);
+  // override tensors allocated on this op if the op is running on GPU
+  int stream_id=0;
+  if(params_->op_device_context){
+    stream_id=params_->op_device_context->GetStreamId();
+  }
   Tensor new_tensor(a, type, shape,
                     AllocationAttributes(allocation_attr.no_retry_on_failure,
                                          /* allocation_will_be_logged= */ true,
-                                         allocation_attr.freed_by_func));
+                                         allocation_attr.freed_by_func,
+                                         stream_id));
 
   if (!new_tensor.IsInitialized()) {
     return errors::ResourceExhausted(

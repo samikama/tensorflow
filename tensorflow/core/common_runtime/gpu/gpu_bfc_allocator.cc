@@ -51,7 +51,11 @@ bool GPUBFCAllocator::GetAllowGrowthValue(const GPUOptions& gpu_options) {
       << " of " << gpu_options.allow_growth() << ".";
   return gpu_options.allow_growth();
 }
-
+int GPUBFCAllocator::GetMaxStreams(const GPUOptions& gpu_options) {
+  int num_streams = gpu_options.experimental().max_streams();
+  if (num_streams == 0) return 1;
+  return num_streams;
+}
 GPUBFCAllocator::GPUBFCAllocator(GPUMemAllocator* sub_allocator,
                                  size_t total_memory, const string& name)
     : GPUBFCAllocator(sub_allocator, total_memory, GPUOptions(), name) {}
@@ -61,6 +65,7 @@ GPUBFCAllocator::GPUBFCAllocator(GPUMemAllocator* sub_allocator,
                                  const GPUOptions& gpu_options,
                                  const string& name)
     : BFCAllocator(sub_allocator, total_memory,
-                   GPUBFCAllocator::GetAllowGrowthValue(gpu_options), name) {}
+                   GPUBFCAllocator::GetAllowGrowthValue(gpu_options), name,
+                   GPUBFCAllocator::GetMaxStreams(gpu_options)) {}
 
 }  // namespace tensorflow

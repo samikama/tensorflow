@@ -185,6 +185,8 @@ message GPUOptions {
     // launch an additional kernel will stall until an event
     // completes.
     int32 kernel_tracker_max_pending = 9;
+    // maximum streams in device
+    int32 max_streams = 10;
   }
 
   // Everything inside experimental is subject to change and is not subject
