@@ -38,10 +38,11 @@ struct AllocationAttributes {
   AllocationAttributes() = default;
 
   AllocationAttributes(bool no_retry_on_failure, bool allocation_will_be_logged,
-                       std::function<uint64()>* freed_by_func)
+                       std::function<uint64()>* freed_by_func, int requested_stream)
       : no_retry_on_failure(no_retry_on_failure),
         allocation_will_be_logged(allocation_will_be_logged),
-        freed_by_func(freed_by_func) {}
+        freed_by_func(freed_by_func),
+        requested_stream(requested_stream) {}
 
   // If the first attempt to allocate the memory fails, the allocation
   // should return immediately without retrying.
@@ -58,7 +59,8 @@ struct AllocationAttributes {
   // a memory chunk whose freed_at_count is at this value or earlier may be
   // returned.
   std::function<uint64()>* freed_by_func = nullptr;  // Not owned.
-
+  // requested allocation stream
+  int requested_stream=0;
   TF_DISALLOW_COPY_AND_ASSIGN(AllocationAttributes);
 };
 
@@ -202,7 +204,7 @@ class Allocator {
   // Clears the internal stats except for the `in_use` field.
   virtual void ClearStats() {}
 
-  virtual void SetSafeFrontier(uint64 count) {}
+  virtual void SetSafeFrontier(uint64 count,int stream_id=0) {}
 };
 
 // An implementation of Allocator that delegates all calls to another Allocator.
@@ -307,6 +309,8 @@ struct AllocatorAttributes {
   // a named special-purpose allocator on the same device.
   int32 scope_id = 0;
 
+  // EXPERIMENTAL: Tag stream for memory
+  int32 stream_id = 0;
   // Returns a human readable representation of this.
   string DebugString() const;
 };

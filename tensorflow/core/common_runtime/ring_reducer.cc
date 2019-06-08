@@ -124,11 +124,16 @@ void RingReducer::ContinueAfterInputCopy() {
     // can be provided to the kernel in host memory?
     Tensor group_size_val = ca_->Scalar(group_size_);
     if (col_params_->group.device_type != "CPU") {
-      uint64 safe_alloc_frontier = col_ctx_->device->SafeAllocFrontier(0);
+      DeviceContext* op_dev_ctx = col_ctx_->op_ctx->op_device_context();
+      int stream_id = op_dev_ctx->GetStreamId();
+      uint64 safe_alloc_frontier =
+          col_ctx_->device->SafeAllocFrontier(0, stream_id);
       AllocationAttributes aa;
-      std::function<uint64()> freed_by_func = [this, &safe_alloc_frontier]() {
+      aa.requested_stream = stream_id;
+      std::function<uint64()> freed_by_func = [this, &safe_alloc_frontier,
+                                               stream_id]() {
         safe_alloc_frontier =
-            col_ctx_->device->SafeAllocFrontier(safe_alloc_frontier);
+            col_ctx_->device->SafeAllocFrontier(safe_alloc_frontier, stream_id);
         return safe_alloc_frontier;
       };
       if (safe_alloc_frontier > 0) {
@@ -137,16 +142,15 @@ void RingReducer::ContinueAfterInputCopy() {
       group_size_tensor_ = ca_->Scalar(
           col_ctx_->device->GetAllocator(col_ctx_->op_ctx->input_alloc_attr(0)),
           aa);
-      DeviceContext* op_dev_ctx = col_ctx_->op_ctx->op_device_context();
-      op_dev_ctx->CopyCPUTensorToDevice(
-          &group_size_val, col_ctx_->device, &group_size_tensor_,
-          [this](const Status& s) {
-            if (!s.ok()) {
-              StartAbort(s);
-            }
-            group_size_tensor_ready_.Notify();
-          },
-          (safe_alloc_frontier == 0));
+      op_dev_ctx->CopyCPUTensorToDevice(&group_size_val, col_ctx_->device,
+                                        &group_size_tensor_,
+                                        [this](const Status& s) {
+                                          if (!s.ok()) {
+                                            StartAbort(s);
+                                          }
+                                          group_size_tensor_ready_.Notify();
+                                        },
+                                        (safe_alloc_frontier == 0));
     } else {
       group_size_tensor_ = group_size_val;
       group_size_tensor_ready_.Notify();
@@ -331,8 +335,7 @@ bool RingReducer::RunAsyncParts() {
           case RF_SEND:
             --send_pending_count;
             break;
-          default: {
-          }  // Ignore any other actions
+          default: {}  // Ignore any other actions
         }
       }
     }
