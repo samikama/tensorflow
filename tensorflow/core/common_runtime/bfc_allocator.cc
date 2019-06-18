@@ -272,6 +272,7 @@ void* BFCAllocator::AllocateRawInternal(size_t unused_alignment,
     VLOG(2) << "tried to allocate 0 bytes";
     return nullptr;
   }
+  VLOG(1)<<"Trying to allocate num_bytes "<<num_bytes<<" freed_before= "<<freed_before <<" stream_id= "<<stream_id;
   // First, always allocate memory of at least kMinAllocationSize
   // bytes, and always allocate multiples of kMinAllocationSize bytes
   // so all memory addresses are nicely byte aligned.
@@ -283,7 +284,7 @@ void* BFCAllocator::AllocateRawInternal(size_t unused_alignment,
   mutex_lock l(lock_);
   if (!timestamped_chunks_.empty()) {
     // Merge timestamped chunks whose counts have become safe for general use.
-    MergeTimestampedChunks(0, stream_id);
+    MergeTimestampedChunks(0, stream_id,false);
   }
   void* ptr =
       FindChunkPtr(bin_num, rounded_bytes, num_bytes, freed_before, stream_id);
@@ -378,8 +379,9 @@ void* BFCAllocator::FindChunkPtr(BinNum bin_num, size_t rounded_bytes,
             std::max(stats_.peak_bytes_in_use, stats_.bytes_in_use);
         stats_.largest_alloc_size =
             std::max<std::size_t>(stats_.largest_alloc_size, chunk->size);
-
-        VLOG(4) << "Returning: " << chunk->ptr;
+        // move chunk to current stream
+        chunk->stream_id_=stream_id;
+        VLOG(3) << "Returning: " << chunk->ptr<<" on stream="<<chunk->stream_id_<<" requested stream="<<stream_id;
         if (VLOG_IS_ON(4)) {
           LOG(INFO) << "A: " << RenderOccupancy();
         }
@@ -536,10 +538,11 @@ void BFCAllocator::RemoveFreeChunkFromBin(BFCAllocator::ChunkHandle h) {
 void BFCAllocator::MarkFree(BFCAllocator::ChunkHandle h) {
   Chunk* c = ChunkFromHandle(h);
   CHECK(c->in_use() && (c->bin_num == kInvalidBinNum));
-
+  VLOG(1)<<"Marking free alloc_id= "<<c->allocation_id<<" stream_id="<<c->stream_id_<<" size= "<<c->size;
   // Mark the chunk as no longer in use.
   c->allocation_id = -1;
-  c->stream_id_ = -1;
+
+  // c->stream_id_ = -1;
   // Optionally record the free time.
   if (timing_counter_) {
     c->freed_at_count = timing_counter_->next();
@@ -599,7 +602,8 @@ void BFCAllocator::SetSafeFrontier(uint64 count, int stream_id) {
 }
 
 bool BFCAllocator::MergeTimestampedChunks(size_t required_bytes,
-                                          int stream_id) {
+                                          int stream_id,
+                                          bool ignore_stream) {
   VLOG(1) << "MergeTimestampedChunks queue_len=" << timestamped_chunks_.size()
           << " required_bytes=" << required_bytes;
   bool satisfied = (required_bytes == 0);
@@ -654,7 +658,7 @@ bool BFCAllocator::MergeTimestampedChunks(size_t required_bytes,
       DCHECK_NE(c->bin_num, kInvalidBinNum);
       DCHECK(!c->in_use());
       RemoveFreeChunkFromBin(h);
-      ChunkHandle new_h = TryToCoalesce(h, (required_bytes > 0));
+      ChunkHandle new_h = TryToCoalesce(h, (required_bytes > 0),ignore_stream);
       InsertFreeChunkIntoBin(new_h);
       if (required_bytes > 0) {
         c = ChunkFromHandle(new_h);

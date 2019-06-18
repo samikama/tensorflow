@@ -104,7 +104,7 @@ class BFCAllocator : public Allocator {
   // unsafe merged chunks adopt the most conservative timestamp from their
   // constituents so they're only useful for allocations not requiring a
   // particular timestamp.
-  bool MergeTimestampedChunks(size_t required_bytes,int stream_id=0)
+  bool MergeTimestampedChunks(size_t required_bytes,int stream_id=0, bool ignore_stream=true)
       EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   // A ChunkHandle is an index into the chunks_ vector in BFCAllocator
