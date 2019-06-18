@@ -564,9 +564,11 @@ void BaseGPUDevice::ComputeHelper(OpKernel* op_kernel,
     for (int i = 0; i < context->num_inputs(); ++i) {
       const GPUDeviceContext* idc =
           static_cast<GPUDeviceContext*>(context->input_device_context(i));
-      OP_REQUIRES(context, idc != nullptr,
-                  errors::Internal("Input device context ", i,
-                                   " was not set properly."));
+      // not all ops require all inputs to be present.
+      if(idc==nullptr)continue;
+      // OP_REQUIRES(context, idc != nullptr,
+      //             errors::Internal("Input device context ", i,
+      //                              " was not set properly."));
       if (vlog_2) {
         const void* base;
         size_t len;
