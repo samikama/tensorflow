@@ -1566,7 +1566,7 @@ Status AllocatePreNMSTempTensors(
     Tensor* dev_image_prenms_scores, Tensor* dev_image_boxes_keep_list,
     Tensor* dev_postnms_rois, Tensor* dev_postnms_rois_probs,
     Tensor* dev_prenms_nboxes, int num_images, int num_boxes_to_generate,
-    int box_dim, int post_nms_topn, int pre_nms_topn) {
+    int box_dim, int roi_cols, int post_nms_topn, int pre_nms_topn) {
   auto d = context->eigen_gpu_device();
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_FLOAT, TensorShape({box_dim * num_boxes_to_generate}),
@@ -1586,7 +1586,7 @@ Status AllocatePreNMSTempTensors(
   const int max_postnms_nboxes = std::min(num_boxes_to_generate, post_nms_topn);
   TF_RETURN_IF_ERROR(context->allocate_temp(
       DataType::DT_FLOAT,
-      TensorShape({box_dim * num_images * max_postnms_nboxes}),
+      TensorShape({roi_cols * num_images * max_postnms_nboxes}),
       dev_postnms_rois));
   ResetTensor<float>(dev_postnms_rois, d);
 
@@ -2032,12 +2032,12 @@ class GenerateBoundingBoxProposals : public tensorflow::AsyncOpKernel {
     Tensor dev_prenms_nboxes;
     OP_REQUIRES_OK_ASYNC(
         context,
-        AllocatePreNMSTempTensors(context, &dev_image_prenms_boxes,
-                                  &dev_image_prenms_scores,
-                                  &dev_image_boxes_keep_list, &dev_postnms_rois,
-                                  &dev_postnms_rois_probs, &dev_prenms_nboxes,
-                                  num_images, nboxes_generated, box_dim,
-                                  this->post_nms_topn_, this->pre_nms_topn_),
+        AllocatePreNMSTempTensors(
+            context, &dev_image_prenms_boxes, &dev_image_prenms_scores,
+            &dev_image_boxes_keep_list, &dev_postnms_rois,
+            &dev_postnms_rois_probs, &dev_prenms_nboxes, num_images,
+            nboxes_generated, box_dim, roi_cols, this->post_nms_topn_,
+            this->pre_nms_topn_),
         done);
     int* d_prenms_nboxes = dev_prenms_nboxes.flat<int>().data();
     int h_prenms_nboxes;
@@ -2287,7 +2287,7 @@ class GenerateBoundingBoxProposalsV2 : public tensorflow::AsyncOpKernel {
                                   &dev_image_prenms_scores,
                                   &dev_image_boxes_keep_list, &dev_postnms_rois,
                                   &dev_postnms_rois_probs, &dev_prenms_nboxes,
-                                  num_images, nboxes_generated, box_dim,
+                                  num_images, nboxes_generated, box_dim, roi_cols,
                                   this->post_nms_topn_, this->pre_nms_topn_),
         done);
     CudaLaunchConfig zconfig =
