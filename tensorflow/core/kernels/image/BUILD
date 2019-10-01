@@ -4,7 +4,6 @@ load(
     "//tensorflow:tensorflow.bzl",
     "if_android",
     "if_cuda_or_rocm",
-
     "tf_cc_test",
     "tf_cc_tests",
     "tf_copts",
@@ -105,6 +104,7 @@ cc_library(
         ":adjust_hue_op",
         ":adjust_saturation_op",
         ":attention_ops",
+        ":batched_non_max_suppression_op",
         ":colorspace_op",
         ":crop_and_resize_op",
         ":decode_image_op",
@@ -258,6 +258,12 @@ tf_kernel_library(
 )
 
 tf_kernel_library(
+    name = "batched_non_max_suppression_op",
+    prefix = "batched_non_max_suppresion_op",
+    deps = IMAGE_DEPS + ["//tensorflow/core/kernels:gpu_prim_hdrs"] + ["//tensorflow/core/kernels:transpose_functor"],
+)
+
+tf_kernel_library(
     name = "non_max_suppression_op",
     prefix = "non_max_suppression_op",
     deps = IMAGE_DEPS + ["//tensorflow/core/kernels:gpu_prim_hdrs"],
@@ -302,7 +308,7 @@ tf_kernel_library(
 tf_kernel_library(
     name = "roi_align_op",
     prefix = "roi_align_op",
-    deps = IMAGE_DEPS 
+    deps = IMAGE_DEPS,
 )
 
 tf_kernel_library(
@@ -396,6 +402,16 @@ tf_cuda_cc_test(
 tf_cuda_cc_test(
     name = "non_max_suppression_op_gpu_test",
     srcs = ["non_max_suppression_op_gpu_test.cc"],
+    tags = tf_cuda_tests_tags() + ["no_cuda_on_cpu_tap"],
+    deps = [
+        ":image",
+        "@com_google_absl//absl/strings",
+    ] + IMAGE_TEST_DEPS,
+)
+
+tf_cuda_cc_test(
+    name = "batched_non_max_suppression_op_gpu_test",
+    srcs = ["batched_non_max_suppression_op_gpu_test.cc"],
     tags = tf_cuda_tests_tags() + ["no_cuda_on_cpu_tap"],
     deps = [
         ":image",
