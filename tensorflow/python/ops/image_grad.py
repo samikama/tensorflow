@@ -379,3 +379,47 @@ def _RGBToHSVGrad(op, grad):
 
   gradient_input = math_ops.add(math_ops.add(dv_drgb, ds_drgb), dh_drgb)
   return gradient_input
+
+
+@ops.RegisterGradient("ROIAlign")
+def _ROIAlignGrad(op, grad):
+  """The derivatives for ROIAlign.
+
+  Args:
+    op: The ROIAlign op.
+    grad: The tensor representing the gradient w.r.t. the output.
+
+  Returns:
+    The gradients w.r.t. the input features and always-None
+    gradients w.r.t. rois.
+  """
+  original_input = op.inputs[0]
+  rois = op.inputs[1]
+  sampling_ratio = op.inputs[2]
+  spatial_scale = op.inputs[3]
+  min_level = op.inputs[4]
+  max_level = op.inputs[5]
+  canonical_scale = op.inputs[6]
+  canonical_level = op.inputs[7]
+  #allowed_types = [dtypes.float16, dtypes.float32, dtypes.float64]
+  allowed_types = [dtypes.float32]
+  if op.inputs[0].dtype in allowed_types:
+    # pylint: disable=protected-access
+    grad0 = gen_roi_align_op.roi_align_grad(
+        grad,
+        original_input,
+        rois,
+        sampling_ratio,
+        spatial_scale,
+        min_level,
+        max_level,
+        canonical_scale,
+        canonical_level,
+        pooled_height=op.get_attr("pooled_height"),
+        pooled_width=op.get_attr("pooled_width"),
+    )
+    # pylint: enable=protected-access
+  else:
+    grad0 = None
+  # gradient wrt rois is 0
+  return [grad0, None, None, None, None, None, None]

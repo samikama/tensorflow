@@ -813,6 +813,60 @@ REGISTER_OP("CropAndResizeGradBoxes")
     });
 
 // --------------------------------------------------------------------------
+REGISTER_OP("ROIAlign")
+    .Input("input: float")
+    .Input("rois: float")
+    .Input("sampling_ratio: int32")
+    .Input("spatial_scale: float")
+    .Input("min_level: int32")
+    .Input("max_level: int32")
+    .Input("canonical_scale: float")
+    .Input("canonical_level: int32")
+    .Output("output: float")
+    .Attr("pooled_height: int = 7")
+    .Attr("pooled_width: int = 7")
+    .SetShapeFn([](InferenceContext* c) -> Status {
+      // 5D feature inputs [N,L,C,H,W]
+      ShapeHandle features;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 5, &features));
+      // 3D roi boxes [N,R,4] [ y1, x1, y2, x2]
+      ShapeHandle boxes;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 3, &boxes));
+
+      auto input_shape = c->input(0);
+      auto roi_shape = c->input(1);
+      int pooled_h;
+      TF_RETURN_IF_ERROR(c->GetAttr("pooled_height", &pooled_h));
+      int pooled_w;
+      TF_RETURN_IF_ERROR(c->GetAttr("pooled_width", &pooled_w));
+      auto Rdim = c->Dim(roi_shape, 1);    // Num boxes i.e K
+      auto Cdim = c->Dim(input_shape, 2);  // Num channels = C
+      auto output_shape = c->MakeShape({c->Dim(input_shape, 0), Rdim, Cdim,
+                                        pooled_h, pooled_w});  // N, K, C, H, W
+
+      c->set_output(0, output_shape);
+      return Status::OK();
+    });
+
+REGISTER_OP("ROIAlignGrad")
+    .Input("grads: float")
+    .Input("input: float")
+    .Input("rois: float")
+    .Input("sampling_ratio: int32")
+    .Input("spatial_scale: float")
+    .Input("min_level: int32")
+    .Input("max_level: int32")
+    .Input("canonical_scale: float")
+    .Input("canonical_level: int32")
+    .Output("output: float")
+    .Attr("pooled_height: int = 7")
+    .Attr("pooled_width: int = 7")
+    .SetShapeFn([](InferenceContext* c) -> Status {
+      c->set_output(0, c->input(1));
+      return Status::OK();
+    });
+
+// -----------------------------------------------------------------------------------------
 
 REGISTER_OP("NonMaxSuppression")
     .Input("boxes: float")

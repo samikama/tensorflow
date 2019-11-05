@@ -2791,6 +2791,7 @@ cc_library(
         ":resize_bicubic_op",
         ":resize_bilinear_op",
         ":resize_nearest_neighbor_op",
+        ":roi_align_op",
         ":sample_distorted_bounding_box_op",
         ":scale_and_translate_op",
     ],
@@ -2891,7 +2892,10 @@ tf_kernel_library(
 tf_kernel_library(
     name = "generate_box_proposals_op",
     gpu_srcs = ["generate_box_proposals_op.cu.cc"],
-    deps = if_cuda(["@cub_archive//:cub",":non_max_suppression_op_gpu"]),
+    deps = if_cuda([
+        "@cub_archive//:cub",
+        ":non_max_suppression_op_gpu",
+    ]),
 )
 
 tf_kernel_library(
@@ -2934,6 +2938,12 @@ tf_kernel_library(
     name = "resize_nearest_neighbor_op",
     prefix = "resize_nearest_neighbor_op",
     deps = IMAGE_DEPS,
+)
+
+tf_kernel_library(
+    name = "roi_align_op",
+    prefix = "roi_align_op",
+    deps = IMAGE_DEPS + if_cuda(["@cub_archive//:cub"]),
 )
 
 tf_kernel_library(
