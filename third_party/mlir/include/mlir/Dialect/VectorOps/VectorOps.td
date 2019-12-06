@@ -49,7 +49,7 @@ class Vector_Op<string mnemonic, list<OpTrait> traits = []> :
 def Vector_ContractionOp :
   Vector_Op<"contract", [NoSideEffect]>,
     Arguments<(ins AnyVector:$lhs, AnyVector:$rhs, AnyVector:$acc,
-               Variadic<TupleOf<[Index]>>:$masks,
+               Variadic<VectorOf<[I1]>>:$masks,
                AffineMapArrayAttr:$indexing_maps, ArrayAttr:$iterator_types)>,
     Results<(outs AnyVector)> {
   let summary = "vector contraction operation";
@@ -60,8 +60,9 @@ def Vector_ContractionOp :
     vector result of rank K (where K = num_lhs_free_dims + num_rhs_free_dims +
     num_batch_dims (see dimension type descriptions below)).
 
-    Optional vector mask arguments specify the dynamic dimension sizes of
-    valid data within the lhs/rhs vector arguments.
+    Optional vector mask arguments (produced by CreateMaskOp or ConstantMaskOp)
+    specify the dynamic dimension sizes of valid data within the lhs/rhs vector
+    arguments.
 
     An iterator type attribute list must be specified, where each element of
     the list represents an iterator with one of the following types:
@@ -120,10 +121,8 @@ def Vector_ContractionOp :
 
       // 4D vector contraction with two contracting dimensions and optional
       // vector mask arguments.
-      %lhs_mask = vector.make_tuple %size0, %size1, %size2, %size3
-        : tuple<index, index, index, index>
-      %rhs_mask = vector.make_tuple %size4, %size5, %size6, %size7
-        : tuple<index, index, index, index>
+      %lhs_mask = vector.constant_mask [7, 8, 16, 15] : vector<7x8x16x15xi1>
+      %rhs_mask = vector.constant_mask [8, 16, 7, 5] : vector<8x16x7x5xi1>
 
       %5 = vector.contract #contraction_trait %0, %1, %2, %lhs_mask, %rhs_mask
          : vector<7x8x16x15xf32>, vector<8x16x7x5xf32> into vector<8x15x8x5xf32>
@@ -138,13 +137,13 @@ def Vector_ContractionOp :
     VectorType getAccType() {
       return acc()->getType().cast<VectorType>();
     }
-    TupleType getLHSVectorMaskType() {
-      if (llvm::size(masks()) != 2) return TupleType();
-      return getOperand(3)->getType().cast<TupleType>();
+    VectorType getLHSVectorMaskType() {
+      if (llvm::size(masks()) != 2) return VectorType();
+      return getOperand(3)->getType().cast<VectorType>();
     }
-    TupleType getRHSVectorMaskType() {
-      if (llvm::size(masks()) != 2) return TupleType();
-      return getOperand(4)->getType().cast<TupleType>();
+    VectorType getRHSVectorMaskType() {
+      if (llvm::size(masks()) != 2) return VectorType();
+      return getOperand(4)->getType().cast<VectorType>();
     }
     VectorType getResultType() {
       return getResult()->getType().cast<VectorType>();
@@ -217,21 +216,21 @@ def Vector_BroadcastOp :
   }];
 }
 
-def Vector_ExtractElementOp :
-  Vector_Op<"extractelement", [NoSideEffect,
+def Vector_ExtractOp :
+  Vector_Op<"extract", [NoSideEffect,
      PredOpTrait<"operand and result have same element type",
                  TCresVTEtIsSameAsOpBase<0, 0>>]>,
     Arguments<(ins AnyVector:$vector, I32ArrayAttr:$position)>,
     Results<(outs AnyType)> {
-  let summary = "extractelement operation";
+  let summary = "extract operation";
   let description = [{
     Takes an n-D vector and a k-D position and extracts the (n-k)-D vector at
     the proper position. Degenerates to an element type in the 0-D case.
 
     Examples:
     ```
-      %1 = vector.extractelement %0[3]: vector<4x8x16xf32>
-      %2 = vector.extractelement %0[3, 3, 3]: vector<4x8x16xf32>
+      %1 = vector.extract %0[3]: vector<4x8x16xf32>
+      %2 = vector.extract %0[3, 3, 3]: vector<4x8x16xf32>
     ```
   }];
   let builders = [OpBuilder<
@@ -244,15 +243,15 @@ def Vector_ExtractElementOp :
   }];
 }
 
-def Vector_InsertElementOp :
-  Vector_Op<"insertelement", [NoSideEffect,
+def Vector_InsertOp :
+  Vector_Op<"insert", [NoSideEffect,
      PredOpTrait<"source operand and result have same element type",
                  TCresVTEtIsSameAsOpBase<0, 0>>,
      PredOpTrait<"dest operand and result have same type",
                  TCresIsSameAsOpBase<0, 1>>]>,
      Arguments<(ins AnyType:$source, AnyVector:$dest, I32ArrayAttr:$position)>,
      Results<(outs AnyVector)> {
-  let summary = "insertelement operation";
+  let summary = "insert operation";
   let description = [{
     Takes an n-D source vector, an (n+k)-D destination vector and a k-D position
     and inserts the n-D source into the (n+k)-D destination at the proper
@@ -260,9 +259,9 @@ def Vector_InsertElementOp :
 
     Examples:
     ```
-      %2 = vector.insertelement %0, %1[3 : i32]:
+      %2 = vector.insert %0, %1[3 : i32]:
         vector<8x16xf32> into vector<4x8x16xf32>
-      %5 = vector.insertelement %3, %4[3 : i32, 3 : i32, 3 : i32]:
+      %5 = vector.insert %3, %4[3 : i32, 3 : i32, 3 : i32]:
         f32 into vector<4x8x16xf32>
     ```
   }];
@@ -706,20 +705,4 @@ def Vector_CreateMaskOp :
   let hasCanonicalizer = 1;
 }
 
-// TODO(andydavis) Delete this op once ContractOp is converted to use VectorMask
-def Vector_IndexTupleOp :
-  Vector_Op<"make_index_tuple", [NoSideEffect]>,
-    Arguments<(ins Variadic<Index>:$operands)>,
-    Results<(outs TupleOf<[Index]>)> {
-  let summary = "creates a tuple of operand values";
-  let description = [{
-    Creates and returns a tuple of its operands which must be of index type.
-
-    Example:
-
-      %1 = vector.make_index_tuple %size0, %size1, %size2
-        : tuple<index, index, index>
-
-  }];
-}
 #endif // VECTOR_OPS

@@ -158,6 +158,7 @@ cc_library(
         "lib/Pass/PassDetail.h",
         "lib/Pass/PassManagerOptions.cpp",
         "lib/Pass/PassRegistry.cpp",
+        "lib/Pass/PassStatistics.cpp",
         "lib/Pass/PassTiming.cpp",
     ],
     hdrs = [
@@ -699,6 +700,7 @@ cc_library(
         ":NVVMDialect",
         ":Pass",
         ":Transforms",
+        "@llvm//:support",
     ],
     alwayslink = 1,
 )
@@ -762,6 +764,7 @@ cc_library(
         ":SPIRVDialect",
         ":SPIRVLowering",
         ":StandardToSPIRVConversions",
+        ":Support",
         ":Transforms",
     ],
     alwayslink = 1,
@@ -950,9 +953,11 @@ filegroup(
     srcs = [
         "include/mlir/Analysis/CallInterfaces.td",
         "include/mlir/Dialect/SPIRV/SPIRVArithmeticOps.td",
+        "include/mlir/Dialect/SPIRV/SPIRVAtomicOps.td",
         "include/mlir/Dialect/SPIRV/SPIRVBase.td",
         "include/mlir/Dialect/SPIRV/SPIRVBitOps.td",
         "include/mlir/Dialect/SPIRV/SPIRVCastOps.td",
+        "include/mlir/Dialect/SPIRV/SPIRVCompositeOps.td",
         "include/mlir/Dialect/SPIRV/SPIRVControlFlowOps.td",
         "include/mlir/Dialect/SPIRV/SPIRVGLSLOps.td",
         "include/mlir/Dialect/SPIRV/SPIRVGroupOps.td",

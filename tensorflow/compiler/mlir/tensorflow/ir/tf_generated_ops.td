@@ -94,6 +94,8 @@ Inputs must be of same size and shape.
 
   TF_DerivedOperandTypeAttr T = TF_DerivedOperandTypeAttr<0>;
   TF_DerivedOperandSizeAttr N = TF_DerivedOperandSizeAttr<0>;
+
+  let hasFolder = 1;
 }
 
 def TF_AddV2Op : TF_Op<"AddV2", [Broadcastable, Commutative, NoSideEffect]>,
@@ -143,6 +145,8 @@ retained with length 1.
   );
 
   TF_DerivedOperandTypeAttr Tidx = TF_DerivedOperandTypeAttr<1>;
+
+  let verifier = [{ return Verify(*this); }];
 }
 
 def TF_AnyOp : TF_Op<"Any", [NoSideEffect]> {
@@ -169,6 +173,8 @@ retained with length 1.
   );
 
   TF_DerivedOperandTypeAttr Tidx = TF_DerivedOperandTypeAttr<1>;
+
+  let verifier = [{ return Verify(*this); }];
 }
 
 def TF_ArgMaxOp : TF_Op<"ArgMax", [NoSideEffect]> {
@@ -5117,6 +5123,8 @@ def TF_SplitVOp : TF_Op<"SplitV", [NoSideEffect]> {
   TF_DerivedOperandTypeAttr Tlen = TF_DerivedOperandTypeAttr<1>;
   TF_DerivedOperandTypeAttr T = TF_DerivedOperandTypeAttr<0>;
   TF_DerivedResultSizeAttr num_split = TF_DerivedResultSizeAttr<0>;
+
+  let verifier = [{ return Verify(*this); }];
 }
 
 def TF_SqrtOp : TF_Op<"Sqrt", [NoSideEffect, SameOperandsAndResultType]> {
@@ -5489,6 +5497,65 @@ output. For the internal use of the distributed TPU compiler.
 
   TF_DerivedOperandTypeListAttr Targs = TF_DerivedOperandTypeListAttr<0>;
   TF_DerivedResultTypeListAttr Tresults = TF_DerivedResultTypeListAttr<0>;
+}
+
+def TF_TPUReplicatedInputOp : TF_Op<"TPUReplicatedInput", [NoSideEffect]> {
+  let summary = "Connects N inputs to an N-way replicated TPU computation.";
+
+  let description = [{
+This operation holds a replicated input to a `tpu.replicate()` computation subgraph.
+Each replicated input has the same shape and type alongside the output.
+
+For example:
+```
+%a = "tf.opA"()
+%b = "tf.opB"()
+%replicated_input = "tf.TPUReplicatedInput"(%a, %b)
+%computation = "tf.Computation"(%replicated_input)
+```
+The above computation has a replicated input of two replicas.
+  }];
+
+  let arguments = (ins
+    Variadic<TF_Tensor>:$inputs,
+
+    DefaultValuedAttr<BoolAttr, "false">:$is_mirrored_variable,
+    DefaultValuedAttr<I64Attr, "-1">:$index
+  );
+
+  let results = (outs
+    TF_Tensor:$output
+  );
+
+  TF_DerivedOperandTypeAttr T = TF_DerivedOperandTypeAttr<0>;
+  TF_DerivedOperandSizeAttr N = TF_DerivedOperandSizeAttr<0>;
+}
+
+def TF_TPUReplicatedOutputOp : TF_Op<"TPUReplicatedOutput", [NoSideEffect]> {
+  let summary = "Connects N outputs from an N-way replicated TPU computation.";
+
+  let description = [{
+This operation holds a replicated output from a `tpu.replicate()` computation subgraph.
+Each replicated output has the same shape and type alongside the input.
+
+For example:
+```
+%computation = "tf.Computation"()
+%replicated_output:2 = "tf.TPUReplicatedOutput"(%computation)
+```
+The above computation has a replicated output of two replicas.
+  }];
+
+  let arguments = (ins
+    TF_Tensor:$input
+  );
+
+  let results = (outs
+    Variadic<TF_Tensor>:$outputs
+  );
+
+  TF_DerivedResultSizeAttr num_replicas = TF_DerivedResultSizeAttr<0>;
+  TF_DerivedOperandTypeAttr T = TF_DerivedOperandTypeAttr<0>;
 }
 
 def TF_TanhOp : TF_Op<"Tanh", [NoSideEffect, SameOperandsAndResultType]> {

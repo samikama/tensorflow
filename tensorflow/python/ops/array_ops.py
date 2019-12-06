@@ -210,34 +210,32 @@ def fill(dims, value, name=None):
 
   For example:
 
-  # Output tensor with shape [2, 3].
-  >>> tf.fill([2, 3], 9)
-  <tf.Tensor: shape=(2, 3), dtype=int32, numpy=
-  array([[9, 9, 9],
-         [9, 9, 9]], dtype=int32)>
+  ```
+  # Output tensor has shape [2, 3].
+  fill([2, 3], 9) ==> [[9, 9, 9]
+                       [9, 9, 9]]
+  ```
 
-  `tf.fill` evaluates at graph runtime and supports dynamic shapes based on
-  other runtime `tf.Tensors`, unlike `tf.constant(value, shape=dims)`, which
-  embeds the value as a `Const` node.
+  `tf.fill` differs from `tf.constant` in a few ways:
+
+  *   `tf.fill` only supports scalar contents, whereas `tf.constant` supports
+      Tensor values.
+  *   `tf.fill` creates an Op in the computation graph that constructs the
+  actual
+      Tensor value at runtime. This is in contrast to `tf.constant` which embeds
+      the entire Tensor into the graph with a `Const` node.
+  *   Because `tf.fill` evaluates at graph runtime, it supports dynamic shapes
+      based on other runtime Tensors, unlike `tf.constant`.
 
   Args:
-    dims: A 1-D sequence of non-negative numbers. Represents the shape of the
-      output `tf.Tensor`. Entries should be of type: `int32`, `int64`.
-    value: A value to fill the returned `tf.Tensor`.
-    name: Optional string. The name of the output `tf.Tensor`.
+    dims: A `Tensor`. Must be one of the following types: `int32`, `int64`. 1-D.
+      Represents the shape of the output tensor.
+    value: A `Tensor`. 0-D (scalar). Value to fill the returned tensor.
+      @compatibility(numpy) Equivalent to np.full @end_compatibility
+    name: A name for the operation (optional).
 
   Returns:
-    A `tf.Tensor` with shape `dims` and the same dtype as `value`.
-
-  Raises:
-    InvalidArgumentError: `dims` contains negative entries.
-    NotFoundError: `dims` contains non-integer entries.
-
-  @compatibility(numpy)
-  Similar to `np.full`. In `numpy`, more parameters are supported. Passing a
-  number argument as the shape (`np.full(5, value)`) is valid in `numpy` for
-  specifying a 1-D shaped result, while TensorFlow does not support this syntax.
-  @end_compatibility
+    A `Tensor`. Has the same type as `value`.
   """
   result = gen_array_ops.fill(dims, value, name=name)
   tensor_util.maybe_set_static_shape(result, dims)
@@ -1883,11 +1881,11 @@ unique_with_counts.__doc__ = gen_array_ops.unique_with_counts.__doc__
 
 @tf_export("split")
 def split(value, num_or_size_splits, axis=0, num=None, name="split"):
-  """Splits a tensor into sub tensors.
+  """Splits a tensor `value` into a list of sub tensors.
 
-  If `num_or_size_splits` is an integer, then `value` is split along dimension
-  `axis` into `num_split` smaller tensors. This requires that `num_split` evenly
-  divides `value.shape[axis]`.
+  If `num_or_size_splits` is an integer, then `value` is split along the
+  dimension `axis` into `num_split` smaller tensors. This requires that
+  `value.shape[axis]` is divisible by `num_split`.
 
   If `num_or_size_splits` is a 1-D Tensor (or list), we call it `size_splits`
   and `value` is split into `len(size_splits)` elements. The shape of the `i`-th
@@ -1896,17 +1894,21 @@ def split(value, num_or_size_splits, axis=0, num=None, name="split"):
 
   For example:
 
-  ```python
-  # 'value' is a tensor with shape [5, 30]
-  # Split 'value' into 3 tensors with sizes [4, 15, 11] along dimension 1
-  split0, split1, split2 = tf.split(value, [4, 15, 11], 1)
-  tf.shape(split0)  # [5, 4]
-  tf.shape(split1)  # [5, 15]
-  tf.shape(split2)  # [5, 11]
-  # Split 'value' into 3 tensors along dimension 1
-  split0, split1, split2 = tf.split(value, num_or_size_splits=3, axis=1)
-  tf.shape(split0)  # [5, 10]
-  ```
+  >>> x = tf.Variable(tf.random.uniform([5, 30], -1, 1))
+
+  Split `x` into 3 tensors along dimension 1
+  >>> s0, s1, s2 = tf.split(x, num_or_size_splits=3, axis=1)
+  >>> tf.shape(s0).numpy()
+  array([ 5, 10], dtype=int32)
+
+  Split `x` into 3 tensors with sizes [4, 15, 11] along dimension 1
+  >>> split0, split1, split2 = tf.split(x, [4, 15, 11], 1)
+  >>> tf.shape(split0).numpy()
+  array([5, 4], dtype=int32)
+  >>> tf.shape(split1).numpy()
+  array([ 5, 15], dtype=int32)
+  >>> tf.shape(split2).numpy()
+  array([ 5, 11], dtype=int32)
 
   Args:
     value: The `Tensor` to split.
@@ -1922,8 +1924,8 @@ def split(value, num_or_size_splits, axis=0, num=None, name="split"):
     name: A name for the operation (optional).
 
   Returns:
-    if `num_or_size_splits` is a scalar returns `num_or_size_splits` `Tensor`
-    objects; if `num_or_size_splits` is a 1-D Tensor returns
+    if `num_or_size_splits` is a scalar returns a list of `num_or_size_splits`
+    `Tensor` objects; if `num_or_size_splits` is a 1-D Tensor returns
     `num_or_size_splits.get_shape[0]` `Tensor` objects resulting from splitting
     `value`.
 

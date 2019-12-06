@@ -509,8 +509,9 @@ def LLVM_AddressOfOp
 
     OpBuilder<"Builder *builder, OperationState &result, GlobalOp global, "
               "ArrayRef<NamedAttribute> attrs = {}", [{
-      build(builder, result, global.getType().getPointerTo(), global.sym_name(),
-            attrs);}]>
+      build(builder, result,
+            global.getType().getPointerTo(global.addr_space().getZExtValue()),
+            global.sym_name(), attrs);}]>
   ];
 
   let extraClassDeclaration = [{
@@ -552,7 +553,8 @@ def LLVM_GlobalOp
   let builders = [
     OpBuilder<"Builder *builder, OperationState &result, LLVMType type, "
               "bool isConstant, Linkage linkage, StringRef name, "
-              "Attribute value, ArrayRef<NamedAttribute> attrs = {}">
+              "Attribute value, unsigned addrSpace = 0, "
+              "ArrayRef<NamedAttribute> attrs = {}">
   ];
 
   let extraClassDeclaration = [{
@@ -584,9 +586,7 @@ def LLVM_GlobalOp
 }
 
 def LLVM_LLVMFuncOp
-    : LLVM_ZeroResultOp<"func",
-                        [NativeOpTrait<"IsIsolatedFromAbove">,
-                         NativeOpTrait<"FunctionLike">, Symbol]>,
+    : LLVM_ZeroResultOp<"func", [IsolatedFromAbove, FunctionLike, Symbol]>,
       Arguments<(ins DefaultValuedAttr<Linkage,
                                        "Linkage::External">:$linkage)> {
   let summary = "LLVM dialect function, has wrapped LLVM IR function type";

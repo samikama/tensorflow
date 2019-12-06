@@ -82,16 +82,12 @@ static ParseResult parseContractionOp(OpAsmParser &parser,
   if (masksInfo.size() != 2)
     return parser.emitError(parser.getNameLoc(),
                             "expected zero or exactly 2 vector mask operands");
-  auto indexType = parser.getBuilder().getIndexType();
   auto lhsType = types[0].cast<VectorType>();
   auto rhsType = types[1].cast<VectorType>();
+  auto maskElementType = parser.getBuilder().getI1Type();
   SmallVector<Type, 2> maskTypes;
-  SmallVector<Type, 4> lhsMaskElementTypes(lhsType.getRank(), indexType);
-  maskTypes.push_back(
-      TupleType::get(lhsMaskElementTypes, parser.getBuilder().getContext()));
-  SmallVector<Type, 4> rhsMaskElementTypes(rhsType.getRank(), indexType);
-  maskTypes.push_back(
-      TupleType::get(rhsMaskElementTypes, parser.getBuilder().getContext()));
+  maskTypes.push_back(VectorType::get(lhsType.getShape(), maskElementType));
+  maskTypes.push_back(VectorType::get(rhsType.getShape(), maskElementType));
   if (parser.resolveOperands(masksInfo, maskTypes, loc, result.operands))
     return failure();
   return success();
@@ -231,15 +227,10 @@ static LogicalResult verify(ContractionOp op) {
   if ((lhsMaskType && !rhsMaskType) || (!lhsMaskType && rhsMaskType))
     return op.emitOpError("invalid number of vector masks specified");
   if (lhsMaskType && rhsMaskType) {
-    // Verify tuple element size is != rank.
-    if (lhsMaskType.getTypes().size() != lhsType.getShape().size() ||
-        rhsMaskType.getTypes().size() != rhsType.getShape().size())
-      return op.emitOpError("invalid number of vector mask elements");
-    // Verify all tuple elements are index type.
-    for (auto eltType : lhsMaskType.getTypes()) {
-      if (!eltType.isa<IndexType>())
-        return op.emitOpError("vector mask element must have index type");
-    }
+    // Verify mask rank == argument rank.
+    if (lhsMaskType.getShape().size() != lhsType.getShape().size() ||
+        rhsMaskType.getShape().size() != rhsType.getShape().size())
+      return op.emitOpError("invalid vector mask rank");
   }
   return success();
 }
@@ -333,35 +324,33 @@ SmallVector<AffineMap, 4> ContractionOp::getIndexingMaps() {
 }
 
 //===----------------------------------------------------------------------===//
-// ExtractElementOp
+// ExtractOp
 //===----------------------------------------------------------------------===//
 
-static Type inferExtractElementOpResultType(VectorType vectorType,
-                                            ArrayAttr position) {
+static Type inferExtractOpResultType(VectorType vectorType,
+                                     ArrayAttr position) {
   if (static_cast<int64_t>(position.size()) == vectorType.getRank())
     return vectorType.getElementType();
   return VectorType::get(vectorType.getShape().drop_front(position.size()),
                          vectorType.getElementType());
 }
 
-void vector::ExtractElementOp::build(Builder *builder, OperationState &result,
-                                     Value *source,
-                                     ArrayRef<int32_t> position) {
+void vector::ExtractOp::build(Builder *builder, OperationState &result,
+                              Value *source, ArrayRef<int32_t> position) {
   result.addOperands(source);
   auto positionAttr = builder->getI32ArrayAttr(position);
-  result.addTypes(inferExtractElementOpResultType(
-      source->getType().cast<VectorType>(), positionAttr));
+  result.addTypes(inferExtractOpResultType(source->getType().cast<VectorType>(),
+                                           positionAttr));
   result.addAttribute(getPositionAttrName(), positionAttr);
 }
 
-static void print(OpAsmPrinter &p, vector::ExtractElementOp op) {
+static void print(OpAsmPrinter &p, vector::ExtractOp op) {
   p << op.getOperationName() << " " << *op.vector() << op.position();
   p.printOptionalAttrDict(op.getAttrs(), {"position"});
   p << " : " << op.vector()->getType();
 }
 
-static ParseResult parseExtractElementOp(OpAsmParser &parser,
-                                         OperationState &result) {
+static ParseResult parseExtractOp(OpAsmParser &parser, OperationState &result) {
   llvm::SMLoc attributeLoc, typeLoc;
   SmallVector<NamedAttribute, 4> attrs;
   OpAsmParser::OperandType vector;
@@ -384,13 +373,13 @@ static ParseResult parseExtractElementOp(OpAsmParser &parser,
         attributeLoc,
         "expected position attribute of rank smaller than vector rank");
 
-  Type resType = inferExtractElementOpResultType(vectorType, positionAttr);
+  Type resType = inferExtractOpResultType(vectorType, positionAttr);
   result.attributes = attrs;
   return failure(parser.resolveOperand(vector, type, result.operands) ||
                  parser.addTypeToList(resType, result.types));
 }
 
-static LogicalResult verify(vector::ExtractElementOp op) {
+static LogicalResult verify(vector::ExtractOp op) {
   auto positionAttr = op.position().getValue();
   if (positionAttr.empty())
     return op.emitOpError("expected non-empty position attribute");
@@ -425,16 +414,16 @@ static LogicalResult verify(BroadcastOp op) {
   // Scalar to vector broadcast is always valid. A vector
   // to vector broadcast needs some additional checking.
   if (srcVectorType) {
-    const int64_t srcRank = srcVectorType.getRank();
-    const int64_t dstRank = dstVectorType.getRank();
+    int64_t srcRank = srcVectorType.getRank();
+    int64_t dstRank = dstVectorType.getRank();
     if (srcRank > dstRank)
       return op.emitOpError("source rank higher than destination rank");
     // Source has an exact match or singleton value for all trailing dimensions
     // (all leading dimensions are simply duplicated).
-    const int64_t lead = dstRank - srcRank;
-    for (int64_t i = 0; i < srcRank; i++) {
-      const int64_t srcDim = srcVectorType.getDimSize(i);
-      const int64_t dstDim = dstVectorType.getDimSize(lead + i);
+    int64_t lead = dstRank - srcRank;
+    for (int64_t r = 0; r < srcRank; ++r) {
+      int64_t srcDim = srcVectorType.getDimSize(r);
+      int64_t dstDim = dstVectorType.getDimSize(lead + r);
       if (srcDim != 1 && srcDim != dstDim)
         return op.emitOpError("dimension mismatch (")
                << srcDim << " vs. " << dstDim << ")";
@@ -456,29 +445,26 @@ static ParseResult parseBroadcastOp(OpAsmParser &parser,
 }
 
 //===----------------------------------------------------------------------===//
-// InsertElementOp
+// InsertOp
 //===----------------------------------------------------------------------===//
 
-void InsertElementOp::build(Builder *builder, OperationState &result,
-                            Value *source, Value *dest,
-                            ArrayRef<int32_t> position) {
+void InsertOp::build(Builder *builder, OperationState &result, Value *source,
+                     Value *dest, ArrayRef<int32_t> position) {
   result.addOperands({source, dest});
   auto positionAttr = builder->getI32ArrayAttr(position);
   result.addTypes(dest->getType());
   result.addAttribute(getPositionAttrName(), positionAttr);
 }
 
-static void print(OpAsmPrinter &p, InsertElementOp op) {
+static void print(OpAsmPrinter &p, InsertOp op) {
   p << op.getOperationName() << " " << *op.source() << ", " << *op.dest()
     << op.position();
-  p.printOptionalAttrDict(op.getAttrs(),
-                          {InsertElementOp::getPositionAttrName()});
+  p.printOptionalAttrDict(op.getAttrs(), {InsertOp::getPositionAttrName()});
   p << " : " << op.getSourceType();
   p << " into " << op.getDestVectorType();
 }
 
-static ParseResult parseInsertElementOp(OpAsmParser &parser,
-                                        OperationState &result) {
+static ParseResult parseInsertOp(OpAsmParser &parser, OperationState &result) {
   SmallVector<NamedAttribute, 4> attrs;
   OpAsmParser::OperandType source, dest;
   Type sourceType;
@@ -486,8 +472,7 @@ static ParseResult parseInsertElementOp(OpAsmParser &parser,
   Attribute attr;
   return failure(parser.parseOperand(source) || parser.parseComma() ||
                  parser.parseOperand(dest) ||
-                 parser.parseAttribute(attr,
-                                       InsertElementOp::getPositionAttrName(),
+                 parser.parseAttribute(attr, InsertOp::getPositionAttrName(),
                                        result.attributes) ||
                  parser.parseOptionalAttrDict(attrs) ||
                  parser.parseColonType(sourceType) ||
@@ -497,7 +482,7 @@ static ParseResult parseInsertElementOp(OpAsmParser &parser,
                  parser.addTypeToList(destType, result.types));
 }
 
-static LogicalResult verify(InsertElementOp op) {
+static LogicalResult verify(InsertOp op) {
   auto positionAttr = op.position().getValue();
   if (positionAttr.empty())
     return op.emitOpError("expected non-empty position attribute");
@@ -1218,33 +1203,9 @@ void CreateMaskOp::getCanonicalizationPatterns(
   results.insert<CreateMaskFolder>(context);
 }
 
-//===----------------------------------------------------------------------===//
-// IndexTupleOp
-//===----------------------------------------------------------------------===//
-
-ParseResult parseIndexTupleOp(OpAsmParser &parser, OperationState &result) {
-  auto indexType = parser.getBuilder().getIndexType();
-  Type resultType;
-  SmallVector<OpAsmParser::OperandType, 4> operandInfo;
-  return failure(
-      parser.parseOperandList(operandInfo) ||
-      parser.parseOptionalAttrDict(result.attributes) ||
-      parser.parseColonType(resultType) ||
-      parser.resolveOperands(operandInfo, indexType, result.operands) ||
-      parser.addTypeToList(resultType, result.types));
-}
-
-static void print(OpAsmPrinter &p, IndexTupleOp &op) {
-  p << op.getOperationName() << ' ';
-  p.printOperands(op.operands());
-  p << " : " << op.getResult()->getType();
-}
-
-static LogicalResult verify(IndexTupleOp &op) {
-  for (auto operand : op.getOperands())
-    if (!operand->getType().isa<IndexType>())
-      return op.emitOpError("all operands must be of index type");
-  return success();
+void mlir::vector::populateVectorToVectorCanonicalizationPatterns(
+    OwningRewritePatternList &patterns, MLIRContext *context) {
+  patterns.insert<CreateMaskFolder, StridedSliceConstantMaskFolder>(context);
 }
 
 namespace mlir {

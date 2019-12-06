@@ -42,16 +42,16 @@ struct TensorInfo {
 // requirement for SIMD extensions.
 constexpr int kBufferAlignment = 16;
 
-// If building with GCC 4.8.x or lower, `max_align_t` is not a member of `std`.
-// If using a newer version of GCC, we import `max_align_t` into the local
-// anonymous namespace to be able to use it like the global `max_align_t` from
-// the older clib.
-#ifdef __GNUC__
+// If building with GNU clib from GCC 4.8.x or lower, `max_align_t` is not a
+// member of `std`. If using a newer version of clib, we import `max_align_t`
+// into the local anonymous namespace to be able to use it like the global
+// `max_align_t` from the older clib.
+#if defined(__GNUC__) && defined(__GNUC_PREREQ)
 #if __GNUC_PREREQ(4, 9)
 using std::max_align_t;
 #endif
 #else
-// We assume other compilers don't have this issue.
+// We assume other compiler/clib configurations don't have this issue.
 using std::max_align_t;
 #endif
 
