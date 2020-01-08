@@ -22,9 +22,6 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#if GOOGLE_CUDA
-#include "cuda/include/nvToolsExt.h"
-#endif  // GOOGLE_CUDA
 
 #include "absl/memory/memory.h"
 #include "absl/strings/string_view.h"
@@ -74,63 +71,8 @@ limitations under the License.
 #include "tensorflow/core/profiler/internal/traceme_recorder.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/core/util/tensor_slice_reader_cache.h"
-#include "tensorflow/core/util/env_var.h"
-
 
 namespace tensorflow {
-#if GOOGLE_CUDA
-namespace nvtx_helper {
-inline unsigned hash_string(const char* c) {
-  enum { M = 33 };
-  unsigned hash = 5381;
-  while (*c) {
-    hash = hash * M + *c++;
-  }
-  return hash;
-}
-inline uint32_t get_color(unsigned hash) {
-  const uint32_t colors[] = {0x00aedb, 0xa200ff, 0xf47835, 0xd41243, 0x8ec127,
-                             0xffb3ba, 0xffdfba, 0xffffba, 0xbaffc9, 0xbae1ff,
-                             0xbbcbdb, 0x9ebd9e, 0xdd855c, 0xf1e8ca, 0x745151,
-                             0x2e4045, 0x83adb5, 0xc7bbc9, 0x5e3c58, 0xbfb5b2,
-                             0xff77aa, 0xaaff77, 0x77aaff, 0xffffff, 0x000000};
-  const int ncolor = sizeof(colors) / sizeof(uint32_t);
-  return colors[hash % ncolor];
-}
-inline nvtxRangeId_t nvtxRangeStart(const char* msg,
-                                    uint32_t color = 0x008D9BAF,
-                                    uint32_t category = 0) {
-  nvtxEventAttributes_t attrs = {};
-  attrs.version = NVTX_VERSION;
-  attrs.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
-  attrs.colorType = NVTX_COLOR_ARGB;
-  attrs.color = color;
-  attrs.messageType = NVTX_MESSAGE_TYPE_ASCII;
-  attrs.message.ascii = msg;
-  attrs.category = category;
-  return ::nvtxRangeStartEx(&attrs);
-}
-inline nvtxRangeId_t nvtxRangeStart(const char* msg, const char* type,
-                                    bool set_category = true) {
-  unsigned h = hash_string(type);
-  uint32_t color = get_color(h);
-  uint32_t category = set_category ? h : 0;
-  return nvtxRangeStart(msg, color, category);
-}
-}  // namespace nvtx_helper
-// A helper function to decide whether to enable CUDA NVTX profiling ranges
-static bool NvtxRangesEnabled() {
-  static bool is_enabled = [] {
-    bool is_disabled = false;
-    TF_CHECK_OK(tensorflow::ReadBoolFromEnvVar("TF_DISABLE_NVTX_RANGES",
-                                               /*default_val=*/false,
-                                               &is_disabled));
-    return !is_disabled;
-  }();
-  return is_enabled;
-}
-#endif  // GOOGLE_CUDA
-
 
 namespace {
 
@@ -208,7 +150,6 @@ struct KernelTimer {
     return profile_utils::CpuUtils::GetCurrentClockCycle() - start_cycles;
   }
 };
-
 
 struct NodeItem {
   NodeItem() {}
@@ -1753,7 +1694,6 @@ void ExecutorState::Process(TaggedNode tagged_node, int64 scheduled_nsec) {
     // Set the device_context for this node id, if it exists.
     if (id < device_context_map_.size()) {
       params.op_device_context = device_context_map_[id];
-
     }
 
     params.track_allocations = false;
@@ -1766,15 +1706,6 @@ void ExecutorState::Process(TaggedNode tagged_node, int64 scheduled_nsec) {
       nodestats::SetScheduled(stats, scheduled_nsec);
       nodestats::SetAllStart(stats);
     }
-#if GOOGLE_CUDA
-    nvtxRangeId_t nvtx_range;
-    if (NvtxRangesEnabled()) {
-      nvtx_range = nvtx_helper::nvtxRangeStart(
-          (node->def().op() + ": " + node->name()).c_str(),
-          node->def().op().c_str());
-    }
-#endif  // GOOGLE_CUDA
-
     if (vlog_) {
       VLOG(1) << "Process node: " << id << " step " << params.step_id << " "
               << SummarizeNode(*node) << (tagged_node.is_dead ? " is dead" : "")

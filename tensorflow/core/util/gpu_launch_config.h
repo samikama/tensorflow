@@ -27,6 +27,7 @@ limitations under the License.
 #include "tensorflow/core/platform/stream_executor.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/gpu_cuda_alias.h"
+#include "tensorflow/core/util/env_var.h"
 
 // Usage of GetGpuLaunchConfig, GetGpu2DLaunchConfig, and
 // GetGpu3DLaunchConfig:
@@ -119,7 +120,20 @@ struct GpuLaunchConfig {
   int block_count = -1;
 };
 CREATE_CUDA_TYPE_ALIAS(GpuLaunchConfig, CudaLaunchConfig);
-
+static float GetOccupancyTarget() {
+  static float occupancy_target = [] {
+    float occupancy_target=1.0;
+    int64 occupancy_percentage=100;
+    TF_CHECK_OK(tensorflow::ReadInt64FromEnvVar("TF_TARGET_OCCUPANCY_PERCENTAGE",
+                                               100,
+                                               &occupancy_percentage));
+    occupancy_target=(float)occupancy_percentage/100.;
+    if(occupancy_percentage<10)occupancy_target=0.1;
+    if(occupancy_percentage>100)occupancy_target=1.0;
+    return occupancy_target;
+  }();
+  return occupancy_target;
+}
 // Calculate the GPU launch config we should use for a kernel launch.
 // This is assuming the kernel is quite simple and will largely be
 // memory-limited.
@@ -130,12 +144,12 @@ inline GpuLaunchConfig GetGpuLaunchConfig(int work_element_count,
   GpuLaunchConfig config;
   const int virtual_thread_count = work_element_count;
   const int physical_thread_count = std::min(
-      d.getNumGpuMultiProcessors() * d.maxGpuThreadsPerMultiProcessor(),
+      std::min(1,(int)(d.getNumGpuMultiProcessors()*GetOccupancyTarget())) * d.maxGpuThreadsPerMultiProcessor(),
       virtual_thread_count);
   const int thread_per_block = std::min(1024, d.maxGpuThreadsPerBlock());
   const int block_count =
       std::min(DivUp(physical_thread_count, thread_per_block),
-               d.getNumGpuMultiProcessors());
+               std::min(1,(int)(d.getNumGpuMultiProcessors()*GetOccupancyTarget())));
 
   config.virtual_thread_count = virtual_thread_count;
   config.thread_per_block = thread_per_block;
@@ -264,7 +278,7 @@ inline Gpu2DLaunchConfig GetGpu2DLaunchConfig(int xdim, int ydim,
   int block_rows = std::max(kThreadsPerBlock / block_cols, 1);
 
   const int physical_thread_count =
-      d.getNumGpuMultiProcessors() * d.maxGpuThreadsPerMultiProcessor();
+      std::min(1,(int)(GetOccupancyTarget()*d.getNumGpuMultiProcessors())) * d.maxGpuThreadsPerMultiProcessor();
 
   const int max_blocks = std::max(physical_thread_count / kThreadsPerBlock, 1);
 

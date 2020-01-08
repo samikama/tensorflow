@@ -59,7 +59,7 @@ BFCAllocator::BFCAllocator(SubAllocator* sub_allocator, size_t total_memory,
   // allocations up to (and including) the memory limit.
   for (BinNum b = 0; b < kNumBins; b++) {
     size_t bin_size = BinNumToSize(b);
-    VLOG(1) << "Creating bin of max chunk size "
+    VLOG(1) << name_<< " Creating bin of max chunk size "
             << strings::HumanReadableNumBytes(bin_size);
     new (BinFromIndex(b)) Bin(this, bin_size);
     CHECK_EQ(BinForSize(bin_size), BinFromIndex(b));
@@ -73,7 +73,7 @@ BFCAllocator::BFCAllocator(SubAllocator* sub_allocator, size_t total_memory,
 
 BFCAllocator::~BFCAllocator() {
   // Return memory back.
-  VLOG(2) << "Number of regions allocated: "
+  VLOG(2) << name_<<" Number of regions allocated: "
           << region_manager_.regions().size();
   for (const auto& region : region_manager_.regions()) {
     sub_allocator_->Free(region.ptr(), region.memory_size());
@@ -142,14 +142,14 @@ bool BFCAllocator::Extend(size_t alignment, size_t rounded_bytes) {
     curr_region_allocation_bytes_ *= 2;
   }
 
-  VLOG(1) << "Extending allocation by " << strings::HumanReadableNumBytes(bytes)
+  VLOG(1) << name_<<" Extending allocation by " << strings::HumanReadableNumBytes(bytes)
           << " bytes.";
 
   total_region_allocated_bytes_ += bytes;
-  VLOG(1) << "Total allocated bytes: "
+  VLOG(1) <<name_<< " Total allocated bytes: "
           << strings::HumanReadableNumBytes(total_region_allocated_bytes_);
 
-  VLOG(1) << "Allocated memory at " << mem_addr << " to "
+  VLOG(1) << name_<<" Allocated memory at " << mem_addr << " to "
           << static_cast<void*>(static_cast<char*>(mem_addr) + bytes);
   region_manager_.AddAllocationRegion(mem_addr, bytes);
 
@@ -202,7 +202,7 @@ void* BFCAllocator::AllocateRawInternalWithRetry(
     freed_by_count = (*allocation_attr.freed_by_func)();
   }
   void* r =
-      AllocateRawInternal(unused_alignment, num_bytes, false, freed_by_count);
+      AllocateRawInternal(unused_alignment, num_bytes, false, freed_by_count,allocation_attr.requested_stream);
   if (r != nullptr) {
     return r;
   } else {
@@ -213,7 +213,7 @@ void* BFCAllocator::AllocateRawInternalWithRetry(
           if (allocation_attr.freed_by_func != nullptr) {
             freed_by_count = (*allocation_attr.freed_by_func)();
           }
-          return AllocateRawInternal(a, nb, v, freed_by_count);
+          return AllocateRawInternal(a, nb, v, freed_by_count,allocation_attr.requested_stream);
         },
         kMaxMillisToWait, unused_alignment, num_bytes);
     return r;
@@ -222,7 +222,7 @@ void* BFCAllocator::AllocateRawInternalWithRetry(
 
 void* BFCAllocator::AllocateRaw(size_t unused_alignment, size_t num_bytes,
                                 const AllocationAttributes& allocation_attr) {
-  VLOG(1) << "AllocateRaw " << Name() << "  " << num_bytes;
+  VLOG(1) << name_<< " AllocateRaw " << Name() << "  " << num_bytes<<" on stream "<<allocation_attr.requested_stream;
   if (allocation_attr.no_retry_on_failure) {
     // Return immediately upon the first failure if this is for allocating an
     // optional scratch space.
@@ -232,7 +232,8 @@ void* BFCAllocator::AllocateRaw(size_t unused_alignment, size_t num_bytes,
       freed_by_count = (*allocation_attr.freed_by_func)();
     }
     void* result = AllocateRawInternal(unused_alignment, num_bytes,
-                                       dump_log_on_failure, freed_by_count);
+                                       dump_log_on_failure, freed_by_count,
+                                       allocation_attr.requested_stream);
     if (result == nullptr) {
       static std::atomic<int32> log_counter{0};
       int32 counter_value = log_counter.load(std::memory_order_relaxed);
@@ -272,7 +273,7 @@ void* BFCAllocator::AllocateRawInternal(size_t unused_alignment,
     VLOG(2) << "tried to allocate 0 bytes";
     return nullptr;
   }
-  VLOG(1)<<"Trying to allocate num_bytes "<<num_bytes<<" freed_before= "<<freed_before <<" stream_id= "<<stream_id;
+  VLOG(1)<<name_<<" Trying to allocate num_bytes "<<num_bytes<<" freed_before= "<<freed_before <<" stream_id= "<<stream_id;
   // First, always allocate memory of at least kMinAllocationSize
   // bytes, and always allocate multiples of kMinAllocationSize bytes
   // so all memory addresses are nicely byte aligned.
@@ -343,10 +344,11 @@ void* BFCAllocator::FindChunkPtr(BinNum bin_num, size_t rounded_bytes,
       BFCAllocator::Chunk* chunk = ChunkFromHandle(h);
       DCHECK(!chunk->in_use());
       // skip chunks that are not on same stream
-      if (chunk->stream_id_ >= 0 && chunk->stream_id_ != stream_id) {
-        continue;
-      }
-      if (freed_before > 0 && freed_before < chunk->freed_at_count) {
+      // if (chunk->stream_id_ >= 0 && chunk->stream_id_ != stream_id) {
+      //   continue;
+      // }
+      if (freed_before > 0 && (freed_before < chunk->freed_at_count) && stream_id!=chunk->stream_id_) {
+        VLOG(2)<<name_<<" Skipping chunk because freed_before= "<<freed_before<<" chunk freed_before= "<<chunk->freed_at_count<<" chunk stream_id= "<<chunk->stream_id_<<" requested stream= "<<stream_id;
         continue;
       }
       if (chunk->size >= rounded_bytes) {
@@ -381,7 +383,7 @@ void* BFCAllocator::FindChunkPtr(BinNum bin_num, size_t rounded_bytes,
             std::max<std::size_t>(stats_.largest_alloc_size, chunk->size);
         // move chunk to current stream
         chunk->stream_id_=stream_id;
-        VLOG(3) << "Returning: " << chunk->ptr<<" on stream="<<chunk->stream_id_<<" requested stream="<<stream_id;
+        VLOG(2) <<name_<< " Returning: " << chunk->ptr<<" on stream="<<chunk->stream_id_<<" requested stream="<<stream_id;
         if (VLOG_IS_ON(4)) {
           LOG(INFO) << "A: " << RenderOccupancy();
         }
@@ -434,7 +436,7 @@ void BFCAllocator::SplitChunk(BFCAllocator::ChunkHandle h, size_t num_bytes) {
 }
 
 void BFCAllocator::DeallocateRaw(void* ptr) {
-  VLOG(1) << "DeallocateRaw " << Name() << " "
+  VLOG(1) << name_<<" DeallocateRaw " << Name() << " "
           << (ptr ? RequestedSize(ptr) : 0);
   DeallocateRawInternal(ptr);
   retry_helper_.NotifyDealloc();
@@ -450,7 +452,6 @@ void BFCAllocator::DeallocateRawInternal(void* ptr) {
   // Find the chunk from the ptr.
   BFCAllocator::ChunkHandle h = region_manager_.get_handle(ptr);
   CHECK(h != kInvalidChunkHandle);
-
   MarkFree(h);
 
   // Consider coalescing it.
@@ -458,7 +459,7 @@ void BFCAllocator::DeallocateRawInternal(void* ptr) {
     InsertFreeChunkIntoBin(h);
     timestamped_chunks_.push_back(h);
   } else {
-    InsertFreeChunkIntoBin(TryToCoalesce(h, false));
+    InsertFreeChunkIntoBin(TryToCoalesce(h,false,true));
   }
 
   if (VLOG_IS_ON(4)) {
@@ -538,7 +539,7 @@ void BFCAllocator::RemoveFreeChunkFromBin(BFCAllocator::ChunkHandle h) {
 void BFCAllocator::MarkFree(BFCAllocator::ChunkHandle h) {
   Chunk* c = ChunkFromHandle(h);
   CHECK(c->in_use() && (c->bin_num == kInvalidBinNum));
-  VLOG(1)<<"Marking free alloc_id= "<<c->allocation_id<<" stream_id="<<c->stream_id_<<" size= "<<c->size;
+  VLOG(1)<<name_<<" Marking free alloc_id= "<<c->allocation_id<<" stream_id="<<c->stream_id_<<" size= "<<c->size;
   // Mark the chunk as no longer in use.
   c->allocation_id = -1;
 
@@ -556,34 +557,37 @@ BFCAllocator::ChunkHandle BFCAllocator::TryToCoalesce(ChunkHandle h,
                                                       bool ignore_freed_at,
                                                       bool ignore_stream) {
   Chunk* c = ChunkFromHandle(h);
-  if ((!ignore_freed_at) && c->freed_at_count > 0) return h;
+  if ((!ignore_freed_at) && c->freed_at_count > safe_frontier_[c->stream_id_])
+    return h;
   ChunkHandle coalesced_chunk = h;
-
+  Chunk* other = nullptr;
   // If the next chunk is free, merge it into c and delete it.
-  if (c->next != kInvalidChunkHandle && !ChunkFromHandle(c->next)->in_use() &&
-      (ignore_stream ||
-       c->stream_id_ == ChunkFromHandle(c->next)->stream_id_)) {
-    Chunk* n = ChunkFromHandle(c->next);
-    if ((n->freed_at_count == 0) || ignore_freed_at) {
-      VLOG(4) << "Merging c->next " << n->ptr << " with c " << c->ptr;
-      RemoveFreeChunkFromBin(c->next);
-      // Chunk moves to h's stream if ignore_stream is on
-      Merge(h, c->next);
+  if (c->next != kInvalidChunkHandle) {
+    other = ChunkFromHandle(c->next);
+    if (!other->in_use()) {
+      if ((ignore_stream || (c->stream_id_ == other->stream_id_)) ||
+          (other->freed_at_count <= safe_frontier_[other->stream_id_])) {
+        VLOG(4) << "Merging c->next " << other->ptr << " with c " << c->ptr;
+        RemoveFreeChunkFromBin(c->next);
+        // Chunk moves to h's stream if ignore_stream is on
+        Merge(h, c->next);
+      }
     }
   }
 
   // If the previous chunk is free, merge c into it and delete c.
-  if (c->prev != kInvalidChunkHandle && !ChunkFromHandle(c->prev)->in_use() &&
-      (ignore_stream ||
-       c->stream_id_ == ChunkFromHandle(c->prev)->stream_id_)) {
-    Chunk* n = ChunkFromHandle(c->prev);
-    if ((n->freed_at_count == 0) || ignore_freed_at) {
-      VLOG(4) << "Merging c " << c->ptr << " into c->prev " << n->ptr;
+  if (c->prev != kInvalidChunkHandle){
+      other = ChunkFromHandle(c->prev);
+      if(!other->in_use()){
+      if(ignore_stream ||
+       (c->stream_id_ == other->stream_id_) || (other->freed_at_count<=safe_frontier_[other->stream_id_])) {
+      VLOG(4) << "Merging c " << c->ptr << " into c->prev " << other->ptr;
       coalesced_chunk = c->prev;
       RemoveFreeChunkFromBin(c->prev);
       // h moves to c->prev's stream if ignore_stream==true
       Merge(c->prev, h);
     }
+  }
   }
 
   return coalesced_chunk;
@@ -593,6 +597,7 @@ void BFCAllocator::SetSafeFrontier(uint64 count, int stream_id) {
   uint64 current = safe_frontier_[stream_id].load(std::memory_order_relaxed);
   while (count > current) {
     if (safe_frontier_[stream_id].compare_exchange_strong(current, count)) {
+      VLOG(1)<<name_<<" Updated safe frontier for stream_id "<<stream_id<<" to "<<safe_frontier_[stream_id]<<" count="<<count;
       retry_helper_.NotifyDealloc();
       return;
     } else {
@@ -604,7 +609,7 @@ void BFCAllocator::SetSafeFrontier(uint64 count, int stream_id) {
 bool BFCAllocator::MergeTimestampedChunks(size_t required_bytes,
                                           int stream_id,
                                           bool ignore_stream) {
-  VLOG(1) << "MergeTimestampedChunks queue_len=" << timestamped_chunks_.size()
+  VLOG(1) <<name_<< " MergeTimestampedChunks queue_len=" << timestamped_chunks_.size()
           << " required_bytes=" << required_bytes;
   bool satisfied = (required_bytes == 0);
   std::vector<void*> to_merge;
@@ -632,7 +637,7 @@ bool BFCAllocator::MergeTimestampedChunks(size_t required_bytes,
     DCHECK_NE(c->bin_num, kInvalidBinNum);
     if (required_bytes > 0) {
       to_merge.push_back(c->ptr);
-    } else if (c->freed_at_count < safe_frontier_[stream_id]) {
+    } else if (c->freed_at_count < safe_frontier_[c->stream_id_]) {
       c->freed_at_count = 0;
       to_merge.push_back(c->ptr);
     } else {
@@ -658,7 +663,7 @@ bool BFCAllocator::MergeTimestampedChunks(size_t required_bytes,
       DCHECK_NE(c->bin_num, kInvalidBinNum);
       DCHECK(!c->in_use());
       RemoveFreeChunkFromBin(h);
-      ChunkHandle new_h = TryToCoalesce(h, (required_bytes > 0),ignore_stream);
+      ChunkHandle new_h = TryToCoalesce(h, (required_bytes > 0), ignore_stream);
       InsertFreeChunkIntoBin(new_h);
       if (required_bytes > 0) {
         c = ChunkFromHandle(new_h);

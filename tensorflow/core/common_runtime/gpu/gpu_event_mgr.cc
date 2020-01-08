@@ -18,6 +18,8 @@ limitations under the License.
 #include "tensorflow/core/platform/stacktrace.h"
 #include "tensorflow/core/platform/stream_executor.h"
 #include "tensorflow/core/protobuf/config.pb.h"
+#include "cuda/include/nvtx3/nvToolsExt.h"
+#include <sys/syscall.h>
 
 namespace tensorflow {
 
@@ -67,6 +69,7 @@ void InitThreadpoolLabels(thread::ThreadPool* threadpool) {
     threadpool->Schedule([num_threads, &mu, &init_count, &all_initialized,
                           &exit_count, &ready_to_exit]() {
       gpu_event_mgr::ThreadLabel::SetValue(label);
+      nvtxNameCategory(syscall(SYS_gettid),label);
       mutex_lock l(mu);
       ++init_count;
       if (init_count == num_threads) {

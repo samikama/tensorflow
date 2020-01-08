@@ -26,7 +26,10 @@ limitations under the License.
 #include "tensorflow/core/platform/numa.h"
 #include "tensorflow/core/platform/setround.h"
 #include "tensorflow/core/platform/tracing.h"
-
+#include <sys/syscall.h>
+#if defined(GOOGLE_CUDA)
+#include "cuda/include/nvtx3/nvToolsExt.h"
+#endif
 namespace tensorflow {
 namespace thread {
 
@@ -58,6 +61,9 @@ struct EigenEnvironment {
       if (thread_options_.numa_node != port::kNUMANoAffinity) {
         port::NUMASetThreadNodeAffinity(thread_options_.numa_node);
       }
+#if defined(GOOGLE_CUDA)
+      nvtxNameCategory(syscall(SYS_gettid),name_.c_str());
+#endif
       f();
     });
   }

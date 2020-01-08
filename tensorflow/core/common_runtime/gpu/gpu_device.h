@@ -203,14 +203,13 @@ class GPUKernelTracker {
     Params(int mi, int mb, int mp)
         : max_interval(mi), max_bytes(mb), max_pending(mp) {}
   };
-
   // If we're going to share a SharedCounter with an allocator, it's owned
   // by the allocator because allocators are initialized once per process.
   // Devices are per-session.
   explicit GPUKernelTracker(const Params& params, Env* env,
                             std::vector<se::Stream*> compute_streams,
                             SharedCounter* timing_counter, Allocator* allocator,
-                            EventMgr* event_manager, int max_streams)
+                            EventMgr* event_manager, int max_streams, const string& parent_name)
       : params_(params),
         env_(env),
         stream_(compute_streams),
@@ -222,7 +221,7 @@ class GPUKernelTracker {
             params.max_pending > 0 ? std::max(8, 2 * params.max_pending) : 64),
         free_slots_(params.max_pending > 0 ? std::max(8, 2 * params.max_pending)
                                            : 64),
-        last_completed_(max_streams) {
+        last_completed_(max_streams),parent_name_(parent_name) {
     mem_since_last_ = 0;
     for(int i=0;i<free_slots_.size();i++){
       free_slots_[i]=i;
@@ -261,6 +260,7 @@ class GPUKernelTracker {
   // later than that count are known to have terminated.
   inline uint64 LastTerminatedCount(uint64 old_value,int stream_id=0) {
     uint64 new_value = last_terminated_count_[stream_id].load(std::memory_order_relaxed);
+    VLOG(1)<<parent_name_<<" Last terminated stream= "<<stream_id<<" new_value= "<<new_value<<" old_val= "<<old_value;
     if (new_value == old_value) {
       MaybeQueueProgressEvent(stream_id);
     }
@@ -330,6 +330,7 @@ class GPUKernelTracker {
   // Sum of weights of the outstanding events marking tracked kernels.
   int num_pending_ GUARDED_BY(mu_) = 0;
   condition_variable pending_decreased_ GUARDED_BY(mu_);
+  string parent_name_;
 };
 
 class BaseGPUDeviceFactory : public DeviceFactory {

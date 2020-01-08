@@ -2551,7 +2551,7 @@ cc_library(
                "@double_conversion//:double-conversion",
                "@protobuf_archive//:protobuf",
            ] + tf_protos_all_impl() + tf_protos_grappler_impl() +
-           tf_additional_numa_deps(),
+           tf_additional_numa_deps() + if_cuda(["@local_config_cuda//cuda:cuda_headers"]),
 )
 
 # File compiled with extra flags to get cpu-specific acceleration.

@@ -410,7 +410,7 @@ Status BaseGPUDevice::Init(const SessionOptions& options) {
     }
     kernel_tracker_.reset(new GPUKernelTracker(
         tracker_params, Env::Default(), std::move(compute_streams), timing_counter,
-        timestamped_allocator_ ? gpu_allocator_ : nullptr, em_,max_streams_));
+        timestamped_allocator_ ? gpu_allocator_ : nullptr, em_,max_streams_,name()));
   }
 
   gpu_device_info_ = new GpuDeviceInfo;
@@ -1762,7 +1762,9 @@ Status BaseGPUDeviceFactory::GetValidDeviceIds(
 
 uint64 BaseGPUDevice::SafeAllocFrontier(uint64 old_value, int stream_id) {
   if (timestamped_allocator_) {
-    return kernel_tracker_->LastTerminatedCount(old_value);
+    uint64 curr_value=kernel_tracker_->LastTerminatedCount(old_value,stream_id);
+    VLOG(1)<<name()<<" Safe alloc frontier for stream "<<stream_id<<" old= "<<old_value<<" curr_val"<< curr_value;
+    return curr_value;
   } else {
     return 0;
   }
@@ -1901,6 +1903,7 @@ void GPUKernelTracker::RecordTerminated(uint64 queued_count, int stream_id) {
       last_completed_[stream_id] = pending.queued_count;
     }
   }
+  last_terminated_count_[stream_id]=queued_count;
   if (allocator_) {
     allocator_->SetSafeFrontier(queued_count, stream_id);
   }

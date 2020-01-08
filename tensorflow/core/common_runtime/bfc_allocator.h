@@ -174,14 +174,14 @@ class BFCAllocator : public Allocator {
       strings::StrAppend(
           &dbg, "  Size: ", strings::HumanReadableNumBytes(size),
           " | Requested Size: ", strings::HumanReadableNumBytes(requested_size),
-          " | in_use: ", in_use(), " | bin_num: ", bin_num);
+          " | in_use: ", in_use(), " | bin_num: ", bin_num, " | freed_at: ",freed_at_count," | stream: ",stream_id_);
       if (recurse && prev != BFCAllocator::kInvalidChunkHandle) {
         Chunk* p = a->ChunkFromHandle(prev);
-        strings::StrAppend(&dbg, ", prev: ", p->DebugString(a, false));
+        strings::StrAppend(&dbg, ", PREV: ", p->DebugString(a, false));
       }
       if (recurse && next != BFCAllocator::kInvalidChunkHandle) {
         Chunk* n = a->ChunkFromHandle(next);
-        strings::StrAppend(&dbg, ", next: ", n->DebugString(a, false));
+        strings::StrAppend(&dbg, ", NEXT: ", n->DebugString(a, false));
       }
       return dbg;
     }
@@ -403,7 +403,7 @@ class BFCAllocator : public Allocator {
 
   void MarkFree(ChunkHandle h) EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
-  ChunkHandle TryToCoalesce(ChunkHandle h, bool ignore_freed_at ,bool ignore_stream=true)
+  ChunkHandle TryToCoalesce(ChunkHandle h, bool ignore_freed_at, bool ignore_stream=true)
       EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   // Information about a Bin that is useful for debugging.

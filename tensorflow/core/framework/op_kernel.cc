@@ -50,6 +50,11 @@ limitations under the License.
 #include "tensorflow/core/platform/platform_strings.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/ptr_util.h"
+#if GOOGLE_CUDA
+#include "cuda/include/nvToolsExt.h"
+#endif  // GOOGLE_CUDA
+#include "tensorflow/core/util/env_var.h"
+
 
 namespace tensorflow {
 
@@ -86,6 +91,59 @@ Status MatchSignatureHelper(const DataTypeSlice expected_inputs,
 }
 
 }  // namespace
+
+#if GOOGLE_CUDA
+namespace nvtx_helper {
+inline unsigned hash_string(const char* c) {
+  enum { M = 33 };
+  unsigned hash = 5381;
+  while (*c) {
+    hash = hash * M + *c++;
+  }
+  return hash;
+}
+inline uint32_t get_color(unsigned hash) {
+  const uint32_t colors[] = {0x00aedb, 0xa200ff, 0xf47835, 0xd41243, 0x8ec127,
+                             0xffb3ba, 0xffdfba, 0xffffba, 0xbaffc9, 0xbae1ff,
+                             0xbbcbdb, 0x9ebd9e, 0xdd855c, 0xf1e8ca, 0x745151,
+                             0x2e4045, 0x83adb5, 0xc7bbc9, 0x5e3c58, 0xbfb5b2,
+                             0xff77aa, 0xaaff77, 0x77aaff, 0xffffff, 0x000000};
+  const int ncolor = sizeof(colors) / sizeof(uint32_t);
+  return colors[hash % ncolor];
+}
+inline nvtxRangeId_t nvtxRangeStart(const char* msg,
+                                    uint32_t color = 0x008D9BAF,
+                                    uint32_t category = 0) {
+  nvtxEventAttributes_t attrs = {};
+  attrs.version = NVTX_VERSION;
+  attrs.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+  attrs.colorType = NVTX_COLOR_ARGB;
+  attrs.color = color;
+  attrs.messageType = NVTX_MESSAGE_TYPE_ASCII;
+  attrs.message.ascii = msg;
+  attrs.category = category;
+  return ::nvtxRangeStartEx(&attrs);
+}
+inline nvtxRangeId_t nvtxRangeStart(const char* msg, const char* type,
+                                    bool set_category = true) {
+  unsigned h = hash_string(type);
+  uint32_t color = get_color(h);
+  uint32_t category = set_category ? h : 0;
+  return nvtxRangeStart(msg, color, category);
+}
+}  // namespace nvtx_helper
+// A helper function to decide whether to enable CUDA NVTX profiling ranges
+static bool NvtxRangesEnabled() {
+  static bool is_enabled = [] {
+    bool is_disabled = false;
+    TF_CHECK_OK(tensorflow::ReadBoolFromEnvVar("TF_DISABLE_NVTX_RANGES",
+                                               /*default_val=*/false,
+                                               &is_disabled));
+    return !is_disabled;
+  }();
+  return is_enabled;
+}
+#endif  // GOOGLE_CUDA
 
 // OpKernelBase
 // ------------------------------------------------------------------
@@ -181,13 +239,58 @@ Status OpKernelBase::MakeShape(const Tensor& shape, TensorShape* out) const {
 }
 
 //--------- Trampoline function for instrumentation!
-void OpKernelBase::SysCompute(OpKernelContext* context){
-  Compute(context);
-}
-// -- OpKernelAsyncBase -------------------
-void OpKernelAsyncBase::SysComputeAsync(OpKernelContext* context, DoneCallback done){
-    ComputeAsync(context,std::move(done));
+void OpKernelBase::SysCompute(OpKernelContext* context) {
+#if GOOGLE_CUDA
+  nvtxRangeId_t nvtx_range;
+  if (NvtxRangesEnabled()) {
+    nvtx_range = nvtx_helper::nvtxRangeStart(
+        strings::StrCat(type_string(), ": ", name()).c_str(),
+        type_string().c_str());
   }
+#endif  // GOOGLE_CUDA
+  Compute(context);
+#if GOOGLE_CUDA
+  if (NvtxRangesEnabled()) {
+    nvtxRangeEnd(nvtx_range);
+  }
+#endif  // GOOGLE_CUDA
+}
+template <typename T>
+struct DoneHelper {
+  DoneHelper() = delete;
+  DoneHelper(const DoneHelper&) = delete;
+  DoneHelper(DoneHelper&& other)
+      : done_(std::move(other.done_)), range_(std::move(other.range)){};
+  DoneHelper(T&& d, nvtxRangeId_t t)
+      : done_(std::move(d)), range_(t){};
+  ~DoneHelper(){};
+  DoneHelper& operator=(DoneHelper other) = delete;
+  T done_;
+  nvtxRangeId_t range_;
+};
+// -- OpKernelAsyncBase -------------------
+void OpKernelAsyncBase::SysComputeAsync(OpKernelContext* context,
+                                        DoneCallback done) {
+#if GOOGLE_CUDA
+  nvtxRangeId_t nvtx_range;
+  if (NvtxRangesEnabled()) {
+    nvtx_range = nvtx_helper::nvtxRangeStart(
+        strings::StrCat(type_string(), ": ", name()).c_str(),
+        type_string().c_str());
+    auto dh = std::make_shared<DoneHelper<decltype(done)>>(std::move(done), nvtx_range);
+    auto wrapped_done = [dh]() {
+      nvtxRangeEnd(dh->range_);
+      dh->done_();
+    };
+    ComputeAsync(context, std::move(wrapped_done));
+  } else {
+    ComputeAsync(context, std::move(done));
+  }
+#else
+  ComputeAsync(context, std::move(done));
+#endif  // GOOGLE_CUDA
+}
+
 void OpKernelAsyncBase::Compute(OpKernelContext* context) {
   Notification n;
   ComputeAsync(context, [&n]() { n.Notify(); });
@@ -732,13 +835,26 @@ Status OpKernelContext::allocate_tensor(
   Allocator* a = get_allocator(attr);
   // override tensors allocated on this op if the op is running on GPU
   int stream_id=0;
-  if(params_->op_device_context){
-    stream_id=params_->op_device_context->GetStreamId();
+  auto fbf = allocation_attr.freed_by_func;
+  std::function<uint64()> freed_by_func;
+  if (params_->op_device_context) {
+    stream_id = params_->op_device_context->GetStreamId();
+    if (!fbf) {
+      auto device = params_->device;
+      uint64 safe_alloc_frontier = 0;
+      freed_by_func = [device, &safe_alloc_frontier,
+                                               stream_id]() {
+        safe_alloc_frontier =
+            device->SafeAllocFrontier(safe_alloc_frontier, stream_id);
+        return safe_alloc_frontier;
+      };
+      fbf = &freed_by_func;
+    }
   }
   Tensor new_tensor(a, type, shape,
                     AllocationAttributes(allocation_attr.no_retry_on_failure,
                                          /* allocation_will_be_logged= */ true,
-                                         allocation_attr.freed_by_func,
+                                         fbf,
                                          stream_id));
 
   if (!new_tensor.IsInitialized()) {
