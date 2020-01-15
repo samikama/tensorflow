@@ -38,8 +38,12 @@
 #if GOOGLE_CUDA
 #define EIGEN_USE_GPU
 
-struct __align__(16) Box {
+struct __align__(16) FloatBox {
   float x1, y1, x2, y2;
+};
+
+struct __align__(8) HalfBox {
+  Eigen::half x1, y1, x2, y2;
 };
 
 using absl::StrAppend;
@@ -60,17 +64,29 @@ __device__ EIGEN_STRONG_INLINE void Swap(T& a, T& b) {
   b = c;
 }
 
-// Check whether two boxes have an IoU greater than threshold.
 template <typename T>
+__device__ EIGEN_STRONG_INLINE float asFloat(T x);
+template <>
+__device__ EIGEN_STRONG_INLINE float asFloat(float x) {
+  return x;
+}
+template <>
+__device__ EIGEN_STRONG_INLINE float asFloat(Eigen::half x) {
+  return __half2float(x);
+}
+
+// Check whether two boxes have an IoU greater than threshold.
+template <typename Box>
 __device__ EIGEN_STRONG_INLINE bool OverThreshold(const Box* a, const Box* b,
                                                   const float a_area,
-                                                  const T iou_threshold) {
-  const float b_area = (b->x2 - b->x1) * (b->y2 - b->y1);
+                                                  const float iou_threshold) {
+  const float b_area =
+      (asFloat(b->x2) - asFloat(b->x1)) * (asFloat(b->y2) - asFloat(b->y1));
   if (a_area == 0.0f || b_area == 0.0f) return false;
-  const float xx1 = fmaxf(a->x1, b->x1);
-  const float yy1 = fmaxf(a->y1, b->y1);
-  const float xx2 = fminf(a->x2, b->x2);
-  const float yy2 = fminf(a->y2, b->y2);
+  const float xx1 = asFloat(max(a->x1, b->x1));
+  const float yy1 = asFloat(max(a->y1, b->y1));
+  const float xx2 = asFloat(min(a->x2, b->x2));
+  const float yy2 = asFloat(min(a->y2, b->y2));
 
   // fdimf computes the positive difference between xx2+1 and xx1.
   const float w = fdimf(xx2, xx1);
@@ -86,34 +102,44 @@ __device__ EIGEN_STRONG_INLINE bool OverThreshold(const Box* a, const Box* b,
   return aa >= bt;
 }
 
-template <bool flip_box>
-__device__ EIGEN_STRONG_INLINE void Flipped(Box& box);
+template <bool flip_box, typename T>
+struct Flipped {
+  __device__ EIGEN_STRONG_INLINE void operator()(T& box){};
+};
 
-template <>
-__device__ EIGEN_STRONG_INLINE void Flipped<false>(Box& box) {}
+// template <typename T>
+// __device__ EIGEN_STRONG_INLINE void Flipped<false,T>::operator()(T& box) {}
 
-template <>
-__device__ EIGEN_STRONG_INLINE void Flipped<true>(Box& box) {
-  if (box.x1 > box.x2) Swap(box.x1, box.x2);
-  if (box.y1 > box.y2) Swap(box.y1, box.y2);
-}
-template <bool clip_box>
-__device__ EIGEN_STRONG_INLINE Box Clipped(Box box);
+template <typename T>
+struct Flipped<true, T> {
+  __device__ EIGEN_STRONG_INLINE void operator()(T& box) {
+    if (box.x1 > box.x2) Swap(box.x1, box.x2);
+    if (box.y1 > box.y2) Swap(box.y1, box.y2);
+  }
+};
 
-template <>
-__device__ EIGEN_STRONG_INLINE Box Clipped<false>(Box box) {
-  return std::move(box);
-}
+template <bool clip_box, typename Box>
+struct Clipped {
+  __device__ EIGEN_STRONG_INLINE Box operator()(Box box);
+};
 
+template <typename Box>
+struct Clipped<false, Box> {
+  __device__ EIGEN_STRONG_INLINE Box operator()(Box box) {
+    return std::move(box);
+  }
+};
 // This could lead to box size=0 if used incorrectly!
-template <>
-__device__ EIGEN_STRONG_INLINE Box Clipped<true>(Box box) {
-  box.x1 = fminf(fmaxf(0.0, box.x1), 1.0);
-  box.y1 = fminf(fmaxf(0.0, box.y1), 1.0);
-  box.x2 = fminf(fmaxf(0.0, box.x2), 1.0);
-  box.y2 = fminf(fmaxf(0.0, box.y2), 1.0);
-  return std::move(box);
-}
+template <typename Box>
+struct Clipped<true, Box> {
+  __device__ EIGEN_STRONG_INLINE Box operator()(Box box) {
+    box.x1 = min(max(0.0, box.x1), 1.0);
+    box.y1 = min(max(0.0, box.y1), 1.0);
+    box.x2 = min(max(0.0, box.x2), 1.0);
+    box.y2 = min(max(0.0, box.y2), 1.0);
+    return std::move(box);
+  }
+};
 
 template <typename T>
 __device__ EIGEN_STRONG_INLINE bool CheckBit(const T* bit_mask, int bit) {
@@ -138,19 +164,21 @@ __device__ EIGEN_STRONG_INLINE void ClearBit(T* bit_mask, int bit) {
   atomicAnd(bit_mask + bin, ~(T(1) << (bit & kRemainderMask)));
 }
 
+template <typename Box>
 __global__ void FlipBoxes(Box* boxes, const int* num_batch_boxes,
                           const int* box_strides, const int batch_size) {
   for (const int y : CudaGridRangeY(batch_size)) {
     int box_offset = box_strides[y];
     Box* curr_boxes = boxes + box_offset;
     for (int i : GpuGridRangeX(num_batch_boxes[y])) {
-      Flipped<true>(curr_boxes[i]);
+      Flipped<true, Box>()(curr_boxes[i]);
     }
   }
 }
 
 // This op applies Look-Forward style nms. More efficient when max_accept is
 // closer to the maximum number of boxes
+template <typename Box>
 __launch_bounds__(1024) __global__
     void NMSApplyAndReduceForward(const Box* boxes, const int* num_batch_boxes,
                                   const int* box_strides, const int max_accept,
@@ -189,11 +217,12 @@ __launch_bounds__(1024) __global__
       break;
     }
     const Box b = current_boxes[box];
-    float box_area = (b.x2 - b.x1) * (b.y2 - b.y1);
+    float box_area =
+        (asFloat(b.x2) - asFloat(b.x1)) * (asFloat(b.y2) - asFloat(b.y1));
     // int start = ((box + 1) / blockDim.x) * blockDim.x;
     for (int target = threadIdx.x; target < num_boxes; target += blockDim.x) {
       if (target <= box) continue;
-      if (OverThreshold(&b, current_boxes + target, box_area, iou_threshold)) {
+      if (OverThreshold<Box>(&b, current_boxes + target, box_area, iou_threshold)) {
         ClearBit<int>(selected, target);
       }
     }
@@ -216,6 +245,7 @@ __launch_bounds__(1024) __global__
 
 // This kernel uses Look-Behind algorithm for nms. More efficient when
 // max_accept/num_of_boxes is close to 0.
+template <typename Box>
 __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarp(
     const Box* boxes, const int* num_batch_boxes, const int* box_strides,
     const int max_accept, int max_number_of_boxes, float iou_threshold,
@@ -269,7 +299,8 @@ __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarp(
       SetBit(chunk_mask, i);
       chunk[i] = current_boxes[chunk_begin + i];
       Box* b = chunk + i;
-      areas[i] = (b->y2 - b->y1) * (b->x2 - b->x1);
+      areas[i] =
+          (asFloat(b->y2) - asFloat(b->y1)) * (asFloat(b->x2) - asFloat(b->x1));
     }
     __syncthreads();
     // previous chunks
@@ -372,6 +403,7 @@ __device__ __forceinline__ void SelectHelper(const Index i_selected,
   SelectHelper(i_selected, i_original, args...);
 }
 
+template <typename Box>
 __global__ void BroadcastBoxes(const int num_boxes, const int num_classes,
                                const int batch_size, const Box* input_boxes,
                                Box* output_boxes) {
@@ -422,6 +454,7 @@ __global__ void BatchedIndexMultiSelect(const int* num_elements,
 }
 // Batch version of IndexMultiSelect, num_elemets contains number of elements in
 // each entry offsets is the offsets of batch entries,
+template <typename Box>
 __global__ void TransposedBoxSelect(
     const int* num_elements,     // Number of selected elements for each class
     const int batch_size,        // B
@@ -462,6 +495,7 @@ __global__ void Iota(const int num_elements, const T offset, T* to_fill,
     }
   }
 }
+
 __global__ void BatchIndexScatter(const int* batch_counts, const int* offsets,
                                   int batch_size, const int* input_indices,
                                   int* output_indices) {
@@ -476,9 +510,10 @@ __global__ void BatchIndexScatter(const int* batch_counts, const int* offsets,
   }
 }
 
+template <typename T>
 __launch_bounds__(1024) __global__
-    void FindPartitionIndex(const float* sorted_scores, const int* num_boxes,
-                            const int max_boxes, const float threshold,
+    void FindPartitionIndex(const T* sorted_scores, const int* num_boxes,
+                            const int max_boxes, const T threshold,
                             int* partitions) {
   // do this block by block it shouldn't matter much
   size_t offset = 0;
@@ -488,7 +523,7 @@ __launch_bounds__(1024) __global__
     return;
   }
   for (int i = 0; i < blockIdx.x; ++i) offset += max_boxes;
-  const float* scores = sorted_scores + offset;
+  const T* scores = sorted_scores + offset;
   __syncthreads();
   for (int i = threadIdx.x; i < n_boxes - 1; i += blockDim.x) {
     if (scores[i] > threshold) {
@@ -507,13 +542,13 @@ __launch_bounds__(1024) __global__
   }
 }
 
-template <bool clipped>
+template <bool clipped, typename T, typename Box>
 __global__ void CombineClasses(
     const int* indices,  // Selected box indices per batch per class from
                          // DoNMSBatched [batch,num_classes,per_class_stride]
     const int per_class_stride,  // output per_class stride from DoNmsBatched
     const Box* boxes,  // transposed boxes, [batch_size*numclasses,num_boxes,4]
-    const float* scores,  //  transposed scores [batch,num_classes,num_boxes]
+    const T* scores,   //  transposed scores [batch,num_classes,num_boxes]
     const int* num_selections,  // number of selected boxes in each class from
                                 // [batch*num_classes] DoNMSBatched
     const int num_boxes,        // number of input boxes
@@ -522,8 +557,8 @@ __global__ void CombineClasses(
     bool pad_per_class,         // whether final ouput is padded per class
     int max_output,             // maximum output for final tensors
     Box* out_boxes,             // output boxes concatenated
-    float* out_scores,          // output_scores
-    float* out_classes,         // output classes
+    T* out_scores,              // output_scores
+    T* out_classes,             // output classes
     int* merged_counts,         // output_counts and start offsets for sorting
     int* final_counts,          // counts for final ouput tensors
     int* out_sort_indices) {    // indices for sorting
@@ -531,18 +566,16 @@ __global__ void CombineClasses(
   for (int b : CudaGridRangeZ(num_batches)) {
     const Box* input_boxes = boxes + (b * num_classes) * num_boxes;
     const int* batch_indices = indices + (b * (per_class_stride * num_classes));
-    const float* batch_in_scores = scores + (b * num_boxes * num_classes);
+    const T* batch_in_scores = scores + (b * num_boxes * num_classes);
     Box* batch_out_boxes = out_boxes + (b * (per_class_stride * num_classes));
-    float* batch_out_scores =
-        out_scores + (b * (per_class_stride * num_classes));
-    float* batch_out_classes =
-        out_classes + (b * (per_class_stride * num_classes));
+    T* batch_out_scores = out_scores + (b * (per_class_stride * num_classes));
+    T* batch_out_classes = out_classes + (b * (per_class_stride * num_classes));
     int* batch_out_sort_indices =
         out_sort_indices + (b * (per_class_stride * num_classes));
     for (int c : CudaGridRangeY(num_classes)) {
       const Box* class_boxes = input_boxes + (c * num_boxes);
       const int* class_indices = batch_indices + (c * per_class_stride);
-      const float* class_scores = batch_in_scores + c * num_boxes;
+      const T* class_scores = batch_in_scores + c * num_boxes;
       int out_offset = 0;
       for (int i = b * num_classes; i < (b * num_classes + c); ++i) {
         out_offset += num_selections[i];
@@ -550,7 +583,7 @@ __global__ void CombineClasses(
       for (int idx : CudaGridRangeX(num_selections[b * num_classes + c])) {
         int input_index = class_indices[idx];
         batch_out_boxes[out_offset + idx] =
-            Clipped<clipped>(class_boxes[input_index]);
+            Clipped<clipped,Box>()(class_boxes[input_index]);
         batch_out_scores[out_offset + idx] = class_scores[input_index];
         batch_out_classes[out_offset + idx] = c;
         batch_out_sort_indices[out_offset + idx] = out_offset + idx;
@@ -575,7 +608,7 @@ __global__ void CombineClasses(
     }
   }
 }
-
+template <typename T,typename Box>
 Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
                     const Tensor& scores, const Tensor& box_counts_tensor,
                     const int max_output_size, const float iou_threshold_val,
@@ -631,12 +664,12 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
     // necessary workspace size for sorting after the call.
     cuda_ret = cub::DeviceSegmentedRadixSort::SortPairsDescending(
         nullptr, cub_temp_storage_bytes,
-        static_cast<float*>(nullptr),  // scores
-        static_cast<float*>(nullptr),  // sorted scores
-        static_cast<int*>(nullptr),    // input indices
-        static_cast<int*>(nullptr),    // sorted indices
-        batch_size * max_boxes,        // Total number of boxes in batch
-        batch_size,                    // num segments
+        static_cast<T*>(nullptr),    // scores
+        static_cast<T*>(nullptr),    // sorted scores
+        static_cast<int*>(nullptr),  // input indices
+        static_cast<int*>(nullptr),  // sorted indices
+        batch_size * max_boxes,      // Total number of boxes in batch
+        batch_size,                  // num segments
         static_cast<int*>(nullptr), static_cast<int*>(nullptr), 0,
         8 * sizeof(float),  // sort all bits
         cuda_stream);
@@ -682,10 +715,10 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
         DataType::DT_INT32, TensorShape({max_boxes * batch_size}),
         &d_sorted_indices));
     TF_RETURN_IF_ERROR(context->allocate_temp(
-        DataType::DT_FLOAT, TensorShape({max_boxes * batch_size}),
+        scores.dtype(), TensorShape({max_boxes * batch_size}),
         &d_sorted_scores));
     TF_RETURN_IF_ERROR(context->allocate_temp(
-        DataType::DT_FLOAT, TensorShape({max_boxes * batch_size, 4}),
+        boxes.dtype(), TensorShape({max_boxes * batch_size, 4}),
         &d_sorted_boxes));
   } else {
     d_sorted_indices = d_indices;
@@ -724,14 +757,14 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
   if (!pre_sorted_inputs) {
     cuda_ret = cub::DeviceSegmentedRadixSort::SortPairsDescending(
         d_cub_temp_buffer.flat<int8>().data(), cub_temp_storage_bytes,
-        scores.flat<float>().data(),           // scores
-        d_sorted_scores.flat<float>().data(),  // sorted scores
-        d_indices.flat<int>().data(),          // input indices
-        d_sorted_indices.flat<int>().data(),   // sorted indices
-        batch_size * max_boxes,                // Total number of boxes in batch
-        batch_size,                            // num segments
+        scores.flat<T>().data(),              // scores
+        d_sorted_scores.flat<T>().data(),     // sorted scores
+        d_indices.flat<int>().data(),         // input indices
+        d_sorted_indices.flat<int>().data(),  // sorted indices
+        batch_size * max_boxes,               // Total number of boxes in batch
+        batch_size,                           // num segments
         device_begin_offsets, device_begin_offsets + batch_size, 0,
-        8 * sizeof(float),  // sort all bits
+        8 * sizeof(T),  // sort all bits
         cuda_stream);
     TF_RETURN_IF_CUDA_ERROR(cuda_ret);
   }
@@ -739,8 +772,8 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
     device.memcpyHostToDevice(device_box_counts, box_counts,
                               sizeof(int) * batch_size);
     TF_RETURN_IF_ERROR(GpuLaunchKernel(
-        FindPartitionIndex, batch_size, 1024, 0, device.stream(),
-        d_sorted_scores.flat<float>().data(), device_box_counts, max_boxes,
+        FindPartitionIndex<T>, batch_size, 1024, 0, device.stream(),
+        d_sorted_scores.flat<T>().data(), device_box_counts, max_boxes,
         score_threshold, device_box_counts));
   } else {
     device.memcpyHostToDevice(device_box_counts, box_counts,
@@ -748,12 +781,12 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
   }
   if (!pre_sorted_inputs) {
     TF_RETURN_IF_ERROR(GpuLaunchKernel(
-        BatchedIndexMultiSelect<int, float4>, config2d.block_count,
+        BatchedIndexMultiSelect<int, Box>, config2d.block_count,
         config2d.thread_per_block, 0, device.stream(), device_box_counts,
         device_begin_offsets, device_begin_offsets, batch_size,
         d_sorted_indices.flat<int>().data(),
-        reinterpret_cast<const float4*>(boxes.flat<float>().data()),
-        reinterpret_cast<float4*>(d_sorted_boxes.flat<float>().data())));
+        reinterpret_cast<const Box*>(boxes.flat<float>().data()),
+        reinterpret_cast<Box*>(d_sorted_boxes.flat<float>().data())));
   }
   config2d = GetGpu2DLaunchConfig(max_boxes, batch_size, device);
   Box* sorted_boxes =
@@ -763,7 +796,7 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
   // Make sure that the boxes are flipped to ensure x1<x2 and y1<y2
 
   TF_RETURN_IF_ERROR(GpuLaunchKernel(
-      FlipBoxes, config2d.block_count, config2d.thread_per_block, 0,
+      FlipBoxes<Box>, config2d.block_count, config2d.thread_per_block, 0,
       device.stream(), sorted_boxes, device_box_counts, device_begin_offsets,
       batch_size));
   int bitmask_length_bytes =
@@ -782,7 +815,7 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
   }
   if (kernel == 1) {  // use Look-Forward kernel
     TF_RETURN_IF_ERROR(GpuLaunchKernel(
-        NMSApplyAndReduceForward, batch_size, 1024, bitmask_length_bytes,
+        NMSApplyAndReduceForward<Box>, batch_size, 1024, bitmask_length_bytes,
         device.stream(), sorted_boxes, device_box_counts, device_begin_offsets,
         max_output_size, max_boxes, iou_threshold_val, num_saved_outputs,
         selection_mask));
@@ -792,7 +825,7 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
                    (kNmsReductionChunkSize + sizeof(int) * 8 - 1) / 8;
     shm_size += 8;
     TF_RETURN_IF_ERROR(GpuLaunchKernel(
-        NMSApplyAndReduceChunkedInWarp, batch_size, 1024, shm_size,
+        NMSApplyAndReduceChunkedInWarp<Box>, batch_size, 1024, shm_size,
         device.stream(), sorted_boxes, device_box_counts, device_begin_offsets,
         max_output_size, max_boxes, iou_threshold_val, num_saved_outputs,
         selection_mask));
@@ -845,7 +878,6 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
       max_boxes * batch_size,        // number of elements
       device.stream());
   TF_RETURN_IF_CUDA_ERROR(cuda_ret);
-
 
   config2d = GetGpu2DLaunchConfig(max_boxes, batch_size, device);
   TF_RETURN_IF_ERROR(GpuLaunchKernel(
@@ -917,6 +949,7 @@ Status CheckValidInputs(const Tensor& boxes, const Tensor& scores,
   return Status::OK();
 }
 
+template <typename T>
 Status SortScores(OpKernelContext* context, int batch_size, int num_classes,
                   int num_boxes, Tensor* input_scores, Tensor* indices,
                   Tensor* sorted_scores, Tensor* sorted_indices,
@@ -928,8 +961,8 @@ Status SortScores(OpKernelContext* context, int batch_size, int num_classes,
   auto device = context->eigen_gpu_device();
   cuda_ret = cub::DeviceSegmentedRadixSort::SortPairsDescending(
       nullptr, cub_temp_storage_bytes,
-      static_cast<float*>(nullptr),          // scores
-      static_cast<float*>(nullptr),          // sorted scores
+      static_cast<T*>(nullptr),              // scores
+      static_cast<T*>(nullptr),              // sorted scores
       static_cast<int*>(nullptr),            // input indices
       static_cast<int*>(nullptr),            // sorted indices
       batch_size * num_classes * num_boxes,  // Total number of boxes in batch
@@ -977,8 +1010,8 @@ Status SortScores(OpKernelContext* context, int batch_size, int num_classes,
       DataType::DT_INT32, TensorShape({batch_size * num_classes, num_boxes}),
       sorted_indices));
   TF_RETURN_IF_ERROR(context->allocate_temp(
-      DataType::DT_FLOAT, TensorShape({batch_size * num_classes, num_boxes}),
-      sorted_scores));
+      input_scores->dtype(),
+      TensorShape({batch_size * num_classes, num_boxes}), sorted_scores));
 
   auto config2d =
       GetGpu2DLaunchConfig(num_boxes, batch_size * num_classes, device);
@@ -990,14 +1023,14 @@ Status SortScores(OpKernelContext* context, int batch_size, int num_classes,
 
   TF_RETURN_IF_CUDA_ERROR(cub::DeviceSegmentedRadixSort::SortPairsDescending(
       temp_buffer->flat<int8>().data(), cub_temp_storage_bytes,
-      input_scores->flat<float>().data(),    // scores
-      sorted_scores->flat<float>().data(),   // sorted scores
+      input_scores->flat<T>().data(),        // scores
+      sorted_scores->flat<T>().data(),       // sorted scores
       indices->flat<int>().data(),           // input indices
       sorted_indices->flat<int>().data(),    // sorted indices
       batch_size * num_classes * num_boxes,  // Total number of boxes in batch
       batch_size * num_classes,              // num segments
       device_begin_offsets, device_begin_offsets + batch_size * num_classes, 0,
-      8 * sizeof(float),  // sort all bits
+      8 * sizeof(T),  // sort all bits
       cuda_stream));
   return Status::OK();
 }
@@ -1034,7 +1067,12 @@ class BatchedNonMaxSuppressionGPUOp : public OpKernel {
         context, TensorShapeUtils::IsScalar(score_threshold.shape()),
         errors::InvalidArgument("score_threshold must be 0-D, got shape ",
                                 score_threshold.shape().DebugString()));
-    const float score_threshold_val = score_threshold.scalar<float>()();
+    float score_threshold_val = 0;
+    if (score_threshold.dtype() == DataType::DT_FLOAT) {
+      score_threshold_val = score_threshold.scalar<float>()();
+    } else {
+      score_threshold_val = float(score_threshold.scalar<Eigen::half>()());
+    }
 
     Tensor* num_outputs_t = nullptr;
     int batch_size = boxes.dim_size(0);
@@ -1050,16 +1088,29 @@ class BatchedNonMaxSuppressionGPUOp : public OpKernel {
       return;
     }
 
-    const float iou_threshold_val = iou_threshold.scalar<float>()();
+    float iou_threshold_val = 0;
+    if (iou_threshold.dtype() == DataType::DT_FLOAT) {
+      iou_threshold_val = iou_threshold.scalar<float>()();
+    } else {
+      iou_threshold_val = float(iou_threshold.scalar<Eigen::half>()());
+    }
     const int64_t output_size = max_output_size.scalar<int>()();
     int* num_outputs = num_outputs_t->flat<int>().data();
     Tensor output_tensor;
     Tensor* output_ptr = &output_tensor;
-    OP_REQUIRES_OK(
-        context, DoNMSBatched(context, boxes, scores, box_counts, output_size,
-                              iou_threshold_val, score_threshold_val,
-                              pad_to_max_output_size_, num_outputs, &output_ptr,
-                              kernel_));
+    if (boxes.dtype() == DataType::DT_FLOAT) {
+      OP_REQUIRES_OK(context, DoNMSBatched<float, FloatBox>(
+                                  context, boxes, scores, box_counts,
+                                  output_size, iou_threshold_val,
+                                  score_threshold_val, pad_to_max_output_size_,
+                                  num_outputs, &output_ptr, kernel_));
+    } else {
+      OP_REQUIRES_OK(context, DoNMSBatched<float, HalfBox>(
+                                  context, boxes, scores, box_counts,
+                                  output_size, iou_threshold_val,
+                                  score_threshold_val, pad_to_max_output_size_,
+                                  num_outputs, &output_ptr, kernel_));
+    }
     context->set_output(0, output_tensor);
     return;
   }
@@ -1172,7 +1223,7 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
         device_offsets_tensor, device_selected_counts_tensor;
     OP_REQUIRES_OK(
         context,
-        SortScores(context, batch_size, num_classes, num_boxes,
+        SortScores<float>(context, batch_size, num_classes, num_boxes,
                    &transposed_scores_tensor, &indices, &sorted_scores,
                    &sorted_indices, &cub_temp_buffer, &device_offsets_tensor));
     OP_REQUIRES_OK(
@@ -1183,7 +1234,7 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
       int* device_offsets = device_offsets_tensor.flat<int>().data();
       OP_REQUIRES_OK(
           context,
-          GpuLaunchKernel(FindPartitionIndex, batch_size * num_classes, 1024, 0,
+          GpuLaunchKernel(FindPartitionIndex<float>, batch_size * num_classes, 1024, 0,
                           device.stream(), sorted_scores.flat<float>().data(),
                           device_offsets + 2 * batch_size * num_classes,
                           num_boxes, score_threshold_val,
@@ -1241,16 +1292,16 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
       sorted_scores = sliced_scores;
       auto config3d =
           GetGpu3DLaunchConfig(max_boxes, num_classes, batch_size, device,
-                               TransposedBoxSelect, 0, 1024);
-      const Box* in_boxes =
-          reinterpret_cast<const Box*>(boxes.flat<float>().data());
-      Box* out_boxes =
-          reinterpret_cast<Box*>(reshaped_boxes_tensor.flat<float>().data());
+                               TransposedBoxSelect<FloatBox>, 0, 1024);
+      const FloatBox* in_boxes =
+          reinterpret_cast<const FloatBox*>(boxes.flat<float>().data());
+      FloatBox* out_boxes =
+          reinterpret_cast<FloatBox*>(reshaped_boxes_tensor.flat<float>().data());
 
       OP_REQUIRES_OK(
           context,
           GpuLaunchKernel(
-              TransposedBoxSelect, config3d.block_count,
+              TransposedBoxSelect<FloatBox>, config3d.block_count,
               config3d.thread_per_block, 0, device.stream(),
               device_selected_counts_tensor.flat<int>().data(), batch_size,
               num_classes, (int)boxes.dim_size(2), num_boxes, max_boxes,
@@ -1258,18 +1309,18 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
     } else {
       auto config3d =
           GetGpu3DLaunchConfig(num_boxes, num_classes, batch_size, device,
-                               TransposedBoxSelect, 0, 1024);
+                               TransposedBoxSelect<FloatBox>, 0, 1024);
       OP_REQUIRES_OK(context,
                      context->allocate_temp(
                          DataType::DT_FLOAT,
                          TensorShape({batch_size * num_classes, num_boxes, 4}),
                          &reshaped_boxes_tensor));
 
-      const Box* in_boxes =
-          reinterpret_cast<const Box*>(boxes.flat<float>().data());
+      const FloatBox* in_boxes =
+          reinterpret_cast<const FloatBox*>(boxes.flat<float>().data());
 
-      Box* out_boxes =
-          reinterpret_cast<Box*>(reshaped_boxes_tensor.flat<float>().data());
+      FloatBox* out_boxes =
+          reinterpret_cast<FloatBox*>(reshaped_boxes_tensor.flat<float>().data());
 
       max_boxes = num_boxes;
       int* device_selected_counts = device_offsets_tensor.flat<int>().data() +
@@ -1277,7 +1328,7 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
 
       OP_REQUIRES_OK(
           context, GpuLaunchKernel(
-                       TransposedBoxSelect, config3d.block_count,
+                       TransposedBoxSelect<FloatBox>, config3d.block_count,
                        config3d.thread_per_block, 0, device.stream(),
                        device_selected_counts, batch_size, num_classes,
                        (int)boxes.dim_size(2), num_boxes, num_boxes,
@@ -1292,7 +1343,7 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
                                         &per_class_outputs_tensor));
     int* per_class_outputs = per_class_outputs_tensor.flat<int>().data();
     OP_REQUIRES_OK(
-        context, DoNMSBatched(context, reshaped_boxes_tensor, sorted_scores,
+        context, DoNMSBatched<float,FloatBox>(context, reshaped_boxes_tensor, sorted_scores,
                               box_counts_tensor, max_size_per_class,
                               iou_threshold_val, score_threshold_val, true,
                               per_class_outputs, &output_indices_ptr, 0, true));
@@ -1335,11 +1386,11 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
                                                    &final_counts_tensor));
 
     int* post_nms_indices = output_indices_tensor.flat<int>().data();
-    Box* reshaped_boxes =
-        reinterpret_cast<Box*>(reshaped_boxes_tensor.flat<float>().data());
+    FloatBox* reshaped_boxes =
+        reinterpret_cast<FloatBox*>(reshaped_boxes_tensor.flat<float>().data());
     float* reshaped_scores = sorted_scores.flat<float>().data();
-    Box* out_boxes =
-        reinterpret_cast<Box*>(gathered_boxes_tensor.flat<float>().data());
+    FloatBox* out_boxes =
+        reinterpret_cast<FloatBox*>(gathered_boxes_tensor.flat<float>().data());
     float* out_classes = gathered_classes_tensor.flat<float>().data();
     float* out_scores = gathered_scores_tensor.flat<float>().data();
     int* merged_counts = merged_box_counts_tensor.flat<int>().data();
@@ -1349,12 +1400,12 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
     if (clip_boxes_) {
       Gpu3DLaunchConfig config3d =
           GetGpu3DLaunchConfig(max_size_per_class, num_classes, batch_size,
-                               device, CombineClasses<true>, 0, 1024);
+                               device, CombineClasses<true,float,FloatBox>, 0, 1024);
 
       OP_REQUIRES_OK(
           context,
           GpuLaunchKernel(
-              CombineClasses<true>, config3d.block_count,
+              CombineClasses<true,float,FloatBox>, config3d.block_count,
               config3d.thread_per_block, 0, device.stream(), post_nms_indices,
               max_size_per_class, reshaped_boxes, reshaped_scores,
               per_class_outputs, max_boxes, batch_size, num_classes,
@@ -1363,12 +1414,12 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
     } else {
       Gpu3DLaunchConfig config3d =
           GetGpu3DLaunchConfig(max_size_per_class, num_classes, batch_size,
-                               device, CombineClasses<false>, 0, 1024);
+                               device, CombineClasses<false,float,FloatBox>, 0, 1024);
 
       OP_REQUIRES_OK(
           context,
           GpuLaunchKernel(
-              CombineClasses<false>, config3d.block_count,
+              CombineClasses<false,float,FloatBox>, config3d.block_count,
               config3d.thread_per_block, 0, device.stream(), post_nms_indices,
               max_size_per_class, reshaped_boxes, reshaped_scores,
               per_class_outputs, max_boxes, batch_size, num_classes,
@@ -1380,10 +1431,10 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
         post_nms_device_offsets;
     OP_REQUIRES_OK(
         context,
-        SortScores(context, batch_size, 1, max_size_per_class * num_classes,
+        SortScores<float>(context, batch_size, 1, max_size_per_class * num_classes,
                    &gathered_scores_tensor, &out_sort_indices_tensor,
                    &post_nms_sorted_scores, &post_nms_sorted_indices,
-                   &cub_temp_buffer, &merged_box_counts_tensor,true));
+                   &cub_temp_buffer, &merged_box_counts_tensor, true));
     Tensor* output_boxes_tensor = nullptr;
     OP_REQUIRES_OK(context, context->allocate_output(
                                 0, TensorShape({batch_size, total_output, 4}),
@@ -1397,8 +1448,8 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
                                 2, TensorShape({batch_size, total_output}),
                                 &output_classes_tensor));
     context->set_output(3, final_counts_tensor);
-    Box* final_boxes =
-        reinterpret_cast<Box*>(output_boxes_tensor->flat<float>().data());
+    FloatBox* final_boxes =
+        reinterpret_cast<FloatBox*>(output_boxes_tensor->flat<float>().data());
     float* final_classes = output_classes_tensor->flat<float>().data();
     float* final_scores = output_scores_tensor->flat<float>().data();
     auto zero_config = GetGpuLaunchConfig(batch_size * total_output, device);
@@ -1432,7 +1483,7 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
     OP_REQUIRES_OK(
         context,
         GpuLaunchKernel(
-            BatchedIndexMultiSelect<int, Box, float*, float*, float*, float*>,
+            BatchedIndexMultiSelect<int, FloatBox, float*, float*, float*, float*>,
             config2d.block_count, config2d.thread_per_block, 0, device.stream(),
             final_counts, merged_counts, per_class_outputs, batch_size,
             psorted_indices, out_boxes, final_boxes, out_scores, final_scores,
