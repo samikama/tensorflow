@@ -156,6 +156,8 @@ class Env {
   Status NewReadOnlyMemoryRegionFromFile(
       const string& fname, std::unique_ptr<ReadOnlyMemoryRegion>* result);
 
+  Status StartTransaction(const string& filename, std::unique_ptr<TransactionToken>* token=nullptr);
+  Status EndTransaction(std::unique_ptr<TransactionToken>* token);
   /// Returns OK if the named path exists and NOT_FOUND otherwise.
   Status FileExists(const string& fname);
 

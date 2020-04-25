@@ -38,7 +38,8 @@ limitations under the License.
 
 namespace tensorflow {
 
-bool FileSystem::Match(const string& filename, const string& pattern) {
+
+bool FileSystem::Match(const string& filename, const string& pattern, std::unique_ptr<TransactionToken>* token) {
 #if defined(PLATFORM_POSIX) || defined(IS_MOBILE_PLATFORM)
   // We avoid relying on RE2 on mobile platforms, because it incurs a
   // significant binary size increase.
@@ -70,7 +71,7 @@ string FileSystem::TranslateName(const string& name) const {
   return this->CleanPath(path);
 }
 
-Status FileSystem::IsDirectory(const string& name) {
+Status FileSystem::IsDirectory(const string& name, std::unique_ptr<TransactionToken>* token) {
   // Check if path exists.
   TF_RETURN_IF_ERROR(FileExists(name));
   FileStatistics stat;
@@ -86,10 +87,10 @@ Status FileSystem::HasAtomicMove(const string& path, bool* has_atomic_move) {
   return Status::OK();
 }
 
-void FileSystem::FlushCaches() {}
+void FileSystem::FlushCaches(std::unique_ptr<TransactionToken>* token) {}
 
 bool FileSystem::FilesExist(const std::vector<string>& files,
-                            std::vector<Status>* status) {
+                            std::vector<Status>* status, std::unique_ptr<TransactionToken>* token) {
   bool result = true;
   for (const auto& file : files) {
     Status s = FileExists(file);
@@ -106,7 +107,7 @@ bool FileSystem::FilesExist(const std::vector<string>& files,
 
 Status FileSystem::DeleteRecursively(const string& dirname,
                                      int64* undeleted_files,
-                                     int64* undeleted_dirs) {
+                                     int64* undeleted_dirs, std::unique_ptr<TransactionToken>* token) {
   CHECK_NOTNULL(undeleted_files);
   CHECK_NOTNULL(undeleted_dirs);
 
@@ -176,7 +177,7 @@ Status FileSystem::DeleteRecursively(const string& dirname,
   return ret;
 }
 
-Status FileSystem::RecursivelyCreateDir(const string& dirname) {
+Status FileSystem::RecursivelyCreateDir(const string& dirname, std::unique_ptr<TransactionToken>* token) {
   StringPiece scheme, host, remaining_dir;
   this->ParseURI(dirname, &scheme, &host, &remaining_dir);
   std::vector<StringPiece> sub_dirs;
@@ -221,7 +222,7 @@ Status FileSystem::RecursivelyCreateDir(const string& dirname) {
   return Status::OK();
 }
 
-Status FileSystem::CopyFile(const string& src, const string& target) {
+Status FileSystem::CopyFile(const string& src, const string& target, std::unique_ptr<TransactionToken>* token) {
   return FileSystemCopyFile(this, src, this, target);
 }
 

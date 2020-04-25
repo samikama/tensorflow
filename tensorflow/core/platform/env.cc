@@ -151,6 +151,16 @@ Status Env::FlushFileSystemCaches() {
   }
   return Status::OK();
 }
+Status Env::StartTransaction(const string& fname, std::unique_ptr<tensorflow::TransactionToken>* token){
+  FileSystem* fs;
+  TF_RETURN_IF_ERROR(GetFileSystemForFile(fname, &fs));
+  return fs->StartTransaction(fname, token);
+}
+
+Status Env::EndTransaction(std::unique_ptr<TransactionToken>* token){
+  if(token && *token)
+  return (*token)->owner->EndTransaction(token);
+}
 
 Status Env::NewRandomAccessFile(const string& fname,
                                 std::unique_ptr<RandomAccessFile>* result) {

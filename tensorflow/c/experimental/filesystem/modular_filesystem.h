@@ -61,34 +61,34 @@ class ModularFileSystem final : public FileSystem {
 
   Status NewRandomAccessFile(
       const std::string& fname,
-      std::unique_ptr<RandomAccessFile>* result) override;
+      std::unique_ptr<RandomAccessFile>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
   Status NewWritableFile(const std::string& fname,
-                         std::unique_ptr<WritableFile>* result) override;
+                         std::unique_ptr<WritableFile>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
   Status NewAppendableFile(const std::string& fname,
-                           std::unique_ptr<WritableFile>* result) override;
+                           std::unique_ptr<WritableFile>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
   Status NewReadOnlyMemoryRegionFromFile(
       const std::string& fname,
-      std::unique_ptr<ReadOnlyMemoryRegion>* result) override;
-  Status FileExists(const std::string& fname) override;
+      std::unique_ptr<ReadOnlyMemoryRegion>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status FileExists(const std::string& fname, std::unique_ptr<TransactionToken>* token=nullptr) override;
   bool FilesExist(const std::vector<std::string>& files,
-                  std::vector<Status>* status) override;
+                  std::vector<Status>* status, std::unique_ptr<TransactionToken>* token=nullptr) override;
   Status GetChildren(const std::string& dir,
-                     std::vector<std::string>* result) override;
+                     std::vector<std::string>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
   Status GetMatchingPaths(const std::string& pattern,
-                          std::vector<std::string>* results) override;
-  Status DeleteFile(const std::string& fname) override;
+                          std::vector<std::string>* results, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status DeleteFile(const std::string& fname, std::unique_ptr<TransactionToken>* token=nullptr) override;
   Status DeleteRecursively(const std::string& dirname, int64* undeleted_files,
-                           int64* undeleted_dirs) override;
-  Status DeleteDir(const std::string& dirname) override;
-  Status RecursivelyCreateDir(const std::string& dirname) override;
-  Status CreateDir(const std::string& dirname) override;
-  Status Stat(const std::string& fname, FileStatistics* stat) override;
-  Status IsDirectory(const std::string& fname) override;
-  Status GetFileSize(const std::string& fname, uint64* file_size) override;
-  Status RenameFile(const std::string& src, const std::string& target) override;
-  Status CopyFile(const std::string& src, const std::string& target) override;
+                           int64* undeleted_dirs, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status DeleteDir(const std::string& dirname, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status RecursivelyCreateDir(const std::string& dirname, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status CreateDir(const std::string& dirname, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status Stat(const std::string& fname, FileStatistics* stat, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status IsDirectory(const std::string& fname, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status GetFileSize(const std::string& fname, uint64* file_size, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status RenameFile(const std::string& src, const std::string& target, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status CopyFile(const std::string& src, const std::string& target, std::unique_ptr<TransactionToken>* token=nullptr) override;
   std::string TranslateName(const std::string& name) const override;
-  void FlushCaches() override;
+  void FlushCaches(std::unique_ptr<TransactionToken>* token=nullptr) override;
 
  private:
   std::unique_ptr<TF_Filesystem> filesystem_;
