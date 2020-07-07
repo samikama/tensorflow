@@ -280,7 +280,7 @@ class HDFSRandomAccessFile : public RandomAccessFile {
 };
 
 Status HadoopFileSystem::NewRandomAccessFile(
-    const string& fname, std::unique_ptr<RandomAccessFile>* result, std::unique_ptr<TransactionToken>* token) {
+    const string& fname, std::unique_ptr<RandomAccessFile>* result, TransactionToken* token) {
   hdfsFS fs = nullptr;
   TF_RETURN_IF_ERROR(Connect(fname, &fs));
 
@@ -372,7 +372,7 @@ class HDFSWritableFile : public WritableFile {
 };
 
 Status HadoopFileSystem::NewWritableFile(
-    const string& fname, std::unique_ptr<WritableFile>* result, std::unique_ptr<TransactionToken>* token) {
+    const string& fname, std::unique_ptr<WritableFile>* result, TransactionToken* token) {
   hdfsFS fs = nullptr;
   TF_RETURN_IF_ERROR(Connect(fname, &fs));
 
@@ -386,7 +386,7 @@ Status HadoopFileSystem::NewWritableFile(
 }
 
 Status HadoopFileSystem::NewAppendableFile(
-    const string& fname, std::unique_ptr<WritableFile>* result, std::unique_ptr<TransactionToken>* token) {
+    const string& fname, std::unique_ptr<WritableFile>* result, TransactionToken* token) {
   hdfsFS fs = nullptr;
   TF_RETURN_IF_ERROR(Connect(fname, &fs));
 
@@ -400,7 +400,7 @@ Status HadoopFileSystem::NewAppendableFile(
 }
 
 Status HadoopFileSystem::NewReadOnlyMemoryRegionFromFile(
-    const string& fname, std::unique_ptr<ReadOnlyMemoryRegion>* result, std::unique_ptr<TransactionToken>* token) {
+    const string& fname, std::unique_ptr<ReadOnlyMemoryRegion>* result, TransactionToken* token) {
   // hadoopReadZero() technically supports this call with the following
   // caveats:
   // - It only works up to 2 GB. We'd have to Stat() the file to ensure that
@@ -410,7 +410,7 @@ Status HadoopFileSystem::NewReadOnlyMemoryRegionFromFile(
   return errors::Unimplemented("HDFS does not support ReadOnlyMemoryRegion");
 }
 
-Status HadoopFileSystem::FileExists(const string& fname, std::unique_ptr<TransactionToken>* token) {
+Status HadoopFileSystem::FileExists(const string& fname, TransactionToken* token) {
   hdfsFS fs = nullptr;
   TF_RETURN_IF_ERROR(Connect(fname, &fs));
   if (libhdfs()->hdfsExists(fs, TranslateName(fname).c_str()) == 0) {
@@ -420,7 +420,7 @@ Status HadoopFileSystem::FileExists(const string& fname, std::unique_ptr<Transac
 }
 
 Status HadoopFileSystem::GetChildren(const string& dir,
-                                     std::vector<string>* result, std::unique_ptr<TransactionToken>* token) {
+                                     std::vector<string>* result, TransactionToken* token) {
   result->clear();
   hdfsFS fs = nullptr;
   TF_RETURN_IF_ERROR(Connect(dir, &fs));
@@ -448,11 +448,11 @@ Status HadoopFileSystem::GetChildren(const string& dir,
 }
 
 Status HadoopFileSystem::GetMatchingPaths(const string& pattern,
-                                          std::vector<string>* results, std::unique_ptr<TransactionToken>* token) {
+                                          std::vector<string>* results, TransactionToken* token) {
   return internal::GetMatchingPaths(this, Env::Default(), pattern, results);
 }
 
-Status HadoopFileSystem::DeleteFile(const string& fname, std::unique_ptr<TransactionToken>* token) {
+Status HadoopFileSystem::DeleteFile(const string& fname, TransactionToken* token) {
   hdfsFS fs = nullptr;
   TF_RETURN_IF_ERROR(Connect(fname, &fs));
 
@@ -463,7 +463,7 @@ Status HadoopFileSystem::DeleteFile(const string& fname, std::unique_ptr<Transac
   return Status::OK();
 }
 
-Status HadoopFileSystem::CreateDir(const string& dir, std::unique_ptr<TransactionToken>* token) {
+Status HadoopFileSystem::CreateDir(const string& dir, TransactionToken* token) {
   hdfsFS fs = nullptr;
   TF_RETURN_IF_ERROR(Connect(dir, &fs));
 
@@ -473,7 +473,7 @@ Status HadoopFileSystem::CreateDir(const string& dir, std::unique_ptr<Transactio
   return Status::OK();
 }
 
-Status HadoopFileSystem::DeleteDir(const string& dir, std::unique_ptr<TransactionToken>* token) {
+Status HadoopFileSystem::DeleteDir(const string& dir, TransactionToken* token) {
   hdfsFS fs = nullptr;
   TF_RETURN_IF_ERROR(Connect(dir, &fs));
 
@@ -505,7 +505,7 @@ Status HadoopFileSystem::DeleteDir(const string& dir, std::unique_ptr<Transactio
   return Status::OK();
 }
 
-Status HadoopFileSystem::GetFileSize(const string& fname, uint64* size, std::unique_ptr<TransactionToken>* token) {
+Status HadoopFileSystem::GetFileSize(const string& fname, uint64* size, TransactionToken* token) {
   hdfsFS fs = nullptr;
   TF_RETURN_IF_ERROR(Connect(fname, &fs));
 
@@ -519,7 +519,7 @@ Status HadoopFileSystem::GetFileSize(const string& fname, uint64* size, std::uni
   return Status::OK();
 }
 
-Status HadoopFileSystem::RenameFile(const string& src, const string& target, std::unique_ptr<TransactionToken>* token) {
+Status HadoopFileSystem::RenameFile(const string& src, const string& target, TransactionToken* token) {
   hdfsFS fs = nullptr;
   TF_RETURN_IF_ERROR(Connect(src, &fs));
 
@@ -536,7 +536,7 @@ Status HadoopFileSystem::RenameFile(const string& src, const string& target, std
   return Status::OK();
 }
 
-Status HadoopFileSystem::Stat(const string& fname, FileStatistics* stats, std::unique_ptr<TransactionToken>* token) {
+Status HadoopFileSystem::Stat(const string& fname, FileStatistics* stats, TransactionToken* token) {
   hdfsFS fs = nullptr;
   TF_RETURN_IF_ERROR(Connect(fname, &fs));
 

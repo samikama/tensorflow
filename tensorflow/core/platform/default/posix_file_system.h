@@ -29,39 +29,39 @@ class PosixFileSystem : public FileSystem {
 
   Status NewRandomAccessFile(
       const string& filename,
-      std::unique_ptr<RandomAccessFile>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
+      std::unique_ptr<RandomAccessFile>* result, TransactionToken* token=nullptr) override;
 
   
   Status NewWritableFile(const string& fname,
-                         std::unique_ptr<WritableFile>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
+                         std::unique_ptr<WritableFile>* result, TransactionToken* token=nullptr) override;
 
   Status NewAppendableFile(const string& fname,
-                           std::unique_ptr<WritableFile>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
+                           std::unique_ptr<WritableFile>* result, TransactionToken* token=nullptr) override;
 
   Status NewReadOnlyMemoryRegionFromFile(
       const string& filename,
-      std::unique_ptr<ReadOnlyMemoryRegion>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
+      std::unique_ptr<ReadOnlyMemoryRegion>* result, TransactionToken* token=nullptr) override;
 
-  Status FileExists(const string& fname, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status FileExists(const string& fname, TransactionToken* token=nullptr) override;
 
-  Status GetChildren(const string& dir, std::vector<string>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status GetChildren(const string& dir, std::vector<string>* result, TransactionToken* token=nullptr) override;
 
-  Status Stat(const string& fname, FileStatistics* stats, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status Stat(const string& fname, FileStatistics* stats, TransactionToken* token=nullptr) override;
 
   Status GetMatchingPaths(const string& pattern,
-                          std::vector<string>* results, std::unique_ptr<TransactionToken>* token=nullptr) override;
+                          std::vector<string>* results, TransactionToken* token=nullptr) override;
 
-  Status DeleteFile(const string& fname, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status DeleteFile(const string& fname, TransactionToken* token=nullptr) override;
 
-  Status CreateDir(const string& name, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status CreateDir(const string& name, TransactionToken* token=nullptr) override;
 
-  Status DeleteDir(const string& name, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status DeleteDir(const string& name, TransactionToken* token=nullptr) override;
 
-  Status GetFileSize(const string& fname, uint64* size, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status GetFileSize(const string& fname, uint64* size, TransactionToken* token=nullptr) override;
 
-  Status RenameFile(const string& src, const string& target, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status RenameFile(const string& src, const string& target, TransactionToken* token=nullptr) override;
 
-  Status CopyFile(const string& src, const string& target, std::unique_ptr<TransactionToken>* token=nullptr) override;
+  Status CopyFile(const string& src, const string& target, TransactionToken* token=nullptr) override;
 };
 
 Status IOError(const string& context, int err_number);

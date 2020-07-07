@@ -40,23 +40,23 @@ class RetryingFileSystem : public FileSystem {
 
   Status NewRandomAccessFile(
       const string& filename, std::unique_ptr<RandomAccessFile>* result,
-      std::unique_ptr<TransactionToken>* token = nullptr) override;
+      TransactionToken* token = nullptr) override;
 
   Status NewWritableFile(
       const string& fname, std::unique_ptr<WritableFile>* result,
-      std::unique_ptr<TransactionToken>* token = nullptr) override;
+      TransactionToken* token = nullptr) override;
 
   Status NewAppendableFile(
       const string& fname, std::unique_ptr<WritableFile>* result,
-      std::unique_ptr<TransactionToken>* token = nullptr) override;
+      TransactionToken* token = nullptr) override;
 
   Status NewReadOnlyMemoryRegionFromFile(
       const string& filename, std::unique_ptr<ReadOnlyMemoryRegion>* result,
-      std::unique_ptr<TransactionToken>* token = nullptr) override;
+      TransactionToken* token = nullptr) override;
 
   Status FileExists(
       const string& fname,
-      std::unique_ptr<TransactionToken>* token = nullptr) override {
+      TransactionToken* token = nullptr) override {
     return RetryingUtils::CallWithRetries(
         [this, &fname, token]() {
           return base_file_system_->FileExists(fname, token);
@@ -66,7 +66,7 @@ class RetryingFileSystem : public FileSystem {
 
   Status GetChildren(
       const string& dir, std::vector<string>* result,
-      std::unique_ptr<TransactionToken>* token = nullptr) override {
+      TransactionToken* token = nullptr) override {
     return RetryingUtils::CallWithRetries(
         [this, &dir, result, token]() {
           return base_file_system_->GetChildren(dir, result, token);
@@ -76,7 +76,7 @@ class RetryingFileSystem : public FileSystem {
 
   Status GetMatchingPaths(
       const string& pattern, std::vector<string>* result,
-      std::unique_ptr<TransactionToken>* token = nullptr) override {
+      TransactionToken* token = nullptr) override {
     return RetryingUtils::CallWithRetries(
         [this, &pattern, result, token]() {
           return base_file_system_->GetMatchingPaths(pattern, result, token);
@@ -85,7 +85,7 @@ class RetryingFileSystem : public FileSystem {
   }
 
   Status Stat(const string& fname, FileStatistics* stat,
-              std::unique_ptr<TransactionToken>* token = nullptr) override {
+              TransactionToken* token = nullptr) override {
     return RetryingUtils::CallWithRetries(
         [this, &fname, stat, token]() {
           return base_file_system_->Stat(fname, stat, token);
@@ -95,7 +95,7 @@ class RetryingFileSystem : public FileSystem {
 
   Status DeleteFile(
       const string& fname,
-      std::unique_ptr<TransactionToken>* token = nullptr) override {
+      TransactionToken* token = nullptr) override {
     return RetryingUtils::DeleteWithRetries(
         [this, &fname, token]() {
           return base_file_system_->DeleteFile(fname, token);
@@ -105,7 +105,7 @@ class RetryingFileSystem : public FileSystem {
 
   Status CreateDir(
       const string& dirname,
-      std::unique_ptr<TransactionToken>* token = nullptr) override {
+      TransactionToken* token = nullptr) override {
     return RetryingUtils::CallWithRetries(
         [this, &dirname, token]() {
           return base_file_system_->CreateDir(dirname, token);
@@ -115,7 +115,7 @@ class RetryingFileSystem : public FileSystem {
 
   Status DeleteDir(
       const string& dirname,
-      std::unique_ptr<TransactionToken>* token = nullptr) override {
+      TransactionToken* token = nullptr) override {
     return RetryingUtils::DeleteWithRetries(
         [this, &dirname, token]() {
           return base_file_system_->DeleteDir(dirname, token);
@@ -125,7 +125,7 @@ class RetryingFileSystem : public FileSystem {
 
   Status GetFileSize(
       const string& fname, uint64* file_size,
-      std::unique_ptr<TransactionToken>* token = nullptr) override {
+      TransactionToken* token = nullptr) override {
     return RetryingUtils::CallWithRetries(
         [this, &fname, file_size, token]() {
           return base_file_system_->GetFileSize(fname, file_size, token);
@@ -135,7 +135,7 @@ class RetryingFileSystem : public FileSystem {
 
   Status RenameFile(
       const string& src, const string& target,
-      std::unique_ptr<TransactionToken>* token = nullptr) override {
+      TransactionToken* token = nullptr) override {
     return RetryingUtils::CallWithRetries(
         [this, &src, &target, token]() {
           return base_file_system_->RenameFile(src, target, token);
@@ -145,7 +145,7 @@ class RetryingFileSystem : public FileSystem {
 
   Status IsDirectory(
       const string& dirname,
-      std::unique_ptr<TransactionToken>* token = nullptr) override {
+      TransactionToken* token = nullptr) override {
     return RetryingUtils::CallWithRetries(
         [this, &dirname, token]() {
           return base_file_system_->IsDirectory(dirname, token);
@@ -160,7 +160,7 @@ class RetryingFileSystem : public FileSystem {
 
   Status DeleteRecursively(
       const string& dirname, int64* undeleted_files, int64* undeleted_dirs,
-      std::unique_ptr<TransactionToken>* token = nullptr) override {
+      TransactionToken* token = nullptr) override {
     return RetryingUtils::DeleteWithRetries(
         [this, &dirname, undeleted_files, undeleted_dirs, token]() {
           return base_file_system_->DeleteRecursively(dirname, undeleted_files,
@@ -170,7 +170,7 @@ class RetryingFileSystem : public FileSystem {
   }
 
   void FlushCaches(
-      std::unique_ptr<TransactionToken>* token = nullptr) override {
+      TransactionToken* token = nullptr) override {
     base_file_system_->FlushCaches(token);
   }
 
@@ -255,7 +255,7 @@ class RetryingWritableFile : public WritableFile {
 template <typename Underlying>
 Status RetryingFileSystem<Underlying>::NewRandomAccessFile(
     const string& filename, std::unique_ptr<RandomAccessFile>* result,
-    std::unique_ptr<TransactionToken>* token) {
+    TransactionToken* token) {
   std::unique_ptr<RandomAccessFile> base_file;
   TF_RETURN_IF_ERROR(RetryingUtils::CallWithRetries(
       [this, &filename, &base_file, token]() {
@@ -271,7 +271,7 @@ Status RetryingFileSystem<Underlying>::NewRandomAccessFile(
 template <typename Underlying>
 Status RetryingFileSystem<Underlying>::NewWritableFile(
     const string& filename, std::unique_ptr<WritableFile>* result,
-    std::unique_ptr<TransactionToken>* token) {
+    TransactionToken* token) {
   std::unique_ptr<WritableFile> base_file;
   TF_RETURN_IF_ERROR(RetryingUtils::CallWithRetries(
       [this, &filename, &base_file, token]() {
@@ -286,7 +286,7 @@ Status RetryingFileSystem<Underlying>::NewWritableFile(
 template <typename Underlying>
 Status RetryingFileSystem<Underlying>::NewAppendableFile(
     const string& filename, std::unique_ptr<WritableFile>* result,
-    std::unique_ptr<TransactionToken>* token) {
+    TransactionToken* token) {
   std::unique_ptr<WritableFile> base_file;
   TF_RETURN_IF_ERROR(RetryingUtils::CallWithRetries(
       [this, &filename, &base_file, token]() {
@@ -302,7 +302,7 @@ Status RetryingFileSystem<Underlying>::NewAppendableFile(
 template <typename Underlying>
 Status RetryingFileSystem<Underlying>::NewReadOnlyMemoryRegionFromFile(
     const string& filename, std::unique_ptr<ReadOnlyMemoryRegion>* result,
-    std::unique_ptr<TransactionToken>* token) {
+    TransactionToken* token) {
   return RetryingUtils::CallWithRetries(
       [this, &filename, result, token]() {
         return base_file_system_->NewReadOnlyMemoryRegionFromFile(

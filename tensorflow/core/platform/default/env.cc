@@ -104,7 +104,7 @@ class PosixEnv : public Env {
 
   ~PosixEnv() override { LOG(FATAL) << "Env::Default() must not be destroyed"; }
 
-  bool MatchPath(const string& path, const string& pattern) override {
+  bool MatchPath(const string& path, const string& pattern, TransactionToken* token=nullptr) override {
     return fnmatch(pattern.c_str(), path.c_str(), FNM_PATHNAME) == 0;
   }
 

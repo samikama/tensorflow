@@ -151,53 +151,53 @@ Status Env::FlushFileSystemCaches() {
   }
   return Status::OK();
 }
-Status Env::StartTransaction(const string& fname, std::unique_ptr<tensorflow::TransactionToken>* token){
+Status Env::StartTransaction(const string& fname, TransactionToken** token){
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(fname, &fs));
   return fs->StartTransaction(fname, token);
 }
 
-Status Env::EndTransaction(std::unique_ptr<TransactionToken>* token){
-  if(token && *token)
-  return (*token)->owner->EndTransaction(token);
+Status Env::EndTransaction(TransactionToken* token){
+  if(token)
+  return token->owner->EndTransaction(token);
 }
 
 Status Env::NewRandomAccessFile(const string& fname,
-                                std::unique_ptr<RandomAccessFile>* result) {
+                                std::unique_ptr<RandomAccessFile>* result, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(fname, &fs));
-  return fs->NewRandomAccessFile(fname, result);
+  return fs->NewRandomAccessFile(fname, result,token);
 }
 
 Status Env::NewReadOnlyMemoryRegionFromFile(
-    const string& fname, std::unique_ptr<ReadOnlyMemoryRegion>* result) {
+    const string& fname, std::unique_ptr<ReadOnlyMemoryRegion>* result, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(fname, &fs));
-  return fs->NewReadOnlyMemoryRegionFromFile(fname, result);
+  return fs->NewReadOnlyMemoryRegionFromFile(fname, result,token);
 }
 
 Status Env::NewWritableFile(const string& fname,
-                            std::unique_ptr<WritableFile>* result) {
+                            std::unique_ptr<WritableFile>* result, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(fname, &fs));
-  return fs->NewWritableFile(fname, result);
+  return fs->NewWritableFile(fname, result,token);
 }
 
 Status Env::NewAppendableFile(const string& fname,
-                              std::unique_ptr<WritableFile>* result) {
+                              std::unique_ptr<WritableFile>* result, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(fname, &fs));
-  return fs->NewAppendableFile(fname, result);
+  return fs->NewAppendableFile(fname, result,token);
 }
 
-Status Env::FileExists(const string& fname) {
+Status Env::FileExists(const string& fname, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(fname, &fs));
-  return fs->FileExists(fname);
+  return fs->FileExists(fname,token);
 }
 
 bool Env::FilesExist(const std::vector<string>& files,
-                     std::vector<Status>* status) {
+                     std::vector<Status>* status, TransactionToken* token) {
   std::unordered_map<string, std::vector<string>> files_per_fs;
   for (const auto& file : files) {
     StringPiece scheme, host, path;
@@ -220,7 +220,7 @@ bool Env::FilesExist(const std::vector<string>& files,
         local_status.resize(itr.second.size(), s);
       }
     } else {
-      fs_result = file_system->FilesExist(itr.second, fs_status);
+      fs_result = file_system->FilesExist(itr.second, fs_status,token);
     }
     if (fs_status) {
       result &= fs_result;
@@ -242,53 +242,53 @@ bool Env::FilesExist(const std::vector<string>& files,
   return result;
 }
 
-Status Env::GetChildren(const string& dir, std::vector<string>* result) {
+Status Env::GetChildren(const string& dir, std::vector<string>* result, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(dir, &fs));
-  return fs->GetChildren(dir, result);
+  return fs->GetChildren(dir, result,token);
 }
 
 Status Env::GetMatchingPaths(const string& pattern,
-                             std::vector<string>* results) {
+                             std::vector<string>* results, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(pattern, &fs));
-  return fs->GetMatchingPaths(pattern, results);
+  return fs->GetMatchingPaths(pattern, results,token);
 }
 
-Status Env::DeleteFile(const string& fname) {
+Status Env::DeleteFile(const string& fname, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(fname, &fs));
-  return fs->DeleteFile(fname);
+  return fs->DeleteFile(fname,token);
 }
 
-Status Env::RecursivelyCreateDir(const string& dirname) {
+Status Env::RecursivelyCreateDir(const string& dirname, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(dirname, &fs));
-  return fs->RecursivelyCreateDir(dirname);
+  return fs->RecursivelyCreateDir(dirname,token);
 }
 
-Status Env::CreateDir(const string& dirname) {
+Status Env::CreateDir(const string& dirname, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(dirname, &fs));
-  return fs->CreateDir(dirname);
+  return fs->CreateDir(dirname,token);
 }
 
-Status Env::DeleteDir(const string& dirname) {
+Status Env::DeleteDir(const string& dirname, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(dirname, &fs));
-  return fs->DeleteDir(dirname);
+  return fs->DeleteDir(dirname,token);
 }
 
-Status Env::Stat(const string& fname, FileStatistics* stat) {
+Status Env::Stat(const string& fname, FileStatistics* stat, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(fname, &fs));
-  return fs->Stat(fname, stat);
+  return fs->Stat(fname, stat,token);
 }
 
-Status Env::IsDirectory(const string& fname) {
+Status Env::IsDirectory(const string& fname, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(fname, &fs));
-  return fs->IsDirectory(fname);
+  return fs->IsDirectory(fname,token);
 }
 
 Status Env::HasAtomicMove(const string& path, bool* has_atomic_move) {
@@ -298,19 +298,19 @@ Status Env::HasAtomicMove(const string& path, bool* has_atomic_move) {
 }
 
 Status Env::DeleteRecursively(const string& dirname, int64* undeleted_files,
-                              int64* undeleted_dirs) {
+                              int64* undeleted_dirs, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(dirname, &fs));
-  return fs->DeleteRecursively(dirname, undeleted_files, undeleted_dirs);
+  return fs->DeleteRecursively(dirname, undeleted_files, undeleted_dirs, token);
 }
 
-Status Env::GetFileSize(const string& fname, uint64* file_size) {
+Status Env::GetFileSize(const string& fname, uint64* file_size, TransactionToken* token) {
   FileSystem* fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(fname, &fs));
   return fs->GetFileSize(fname, file_size);
 }
 
-Status Env::RenameFile(const string& src, const string& target) {
+Status Env::RenameFile(const string& src, const string& target, TransactionToken* token) {
   FileSystem* src_fs;
   FileSystem* target_fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(src, &src_fs));
@@ -319,16 +319,16 @@ Status Env::RenameFile(const string& src, const string& target) {
     return errors::Unimplemented("Renaming ", src, " to ", target,
                                  " not implemented");
   }
-  return src_fs->RenameFile(src, target);
+  return src_fs->RenameFile(src, target,token);
 }
 
-Status Env::CopyFile(const string& src, const string& target) {
+Status Env::CopyFile(const string& src, const string& target, TransactionToken* token) {
   FileSystem* src_fs;
   FileSystem* target_fs;
   TF_RETURN_IF_ERROR(GetFileSystemForFile(src, &src_fs));
   TF_RETURN_IF_ERROR(GetFileSystemForFile(target, &target_fs));
   if (src_fs == target_fs) {
-    return src_fs->CopyFile(src, target);
+    return src_fs->CopyFile(src, target,token);
   }
   return FileSystemCopyFile(src_fs, src, target_fs, target);
 }
@@ -430,14 +430,14 @@ Thread::~Thread() {}
 
 EnvWrapper::~EnvWrapper() {}
 
-Status ReadFileToString(Env* env, const string& fname, string* data) {
+Status ReadFileToString(Env* env, const string& fname, string* data, TransactionToken* token) {
   uint64 file_size;
-  Status s = env->GetFileSize(fname, &file_size);
+  Status s = env->GetFileSize(fname, &file_size, token);
   if (!s.ok()) {
     return s;
   }
   std::unique_ptr<RandomAccessFile> file;
-  s = env->NewRandomAccessFile(fname, &file);
+  s = env->NewRandomAccessFile(fname, &file, token);
   if (!s.ok()) {
     return s;
   }
@@ -460,9 +460,9 @@ Status ReadFileToString(Env* env, const string& fname, string* data) {
 }
 
 Status WriteStringToFile(Env* env, const string& fname,
-                         const StringPiece& data) {
+                         const StringPiece& data, TransactionToken* token) {
   std::unique_ptr<WritableFile> file;
-  Status s = env->NewWritableFile(fname, &file);
+  Status s = env->NewWritableFile(fname, &file, token);
   if (!s.ok()) {
     return s;
   }

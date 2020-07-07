@@ -109,7 +109,7 @@ class Env {
   /// and the object should be deleted when is not used. The file object
   /// shouldn't live longer than the Env object.
   Status NewRandomAccessFile(const string& fname,
-                             std::unique_ptr<RandomAccessFile>* result);
+                             std::unique_ptr<RandomAccessFile>* result, TransactionToken* token=nullptr);
 
   /// \brief Creates an object that writes to a new file with the specified
   /// name.
@@ -125,7 +125,7 @@ class Env {
   /// and the object should be deleted when is not used. The file object
   /// shouldn't live longer than the Env object.
   Status NewWritableFile(const string& fname,
-                         std::unique_ptr<WritableFile>* result);
+                         std::unique_ptr<WritableFile>* result, TransactionToken* token=nullptr);
 
   /// \brief Creates an object that either appends to an existing file, or
   /// writes to a new file (if the file does not exist to begin with).
@@ -140,7 +140,7 @@ class Env {
   /// and the object should be deleted when is not used. The file object
   /// shouldn't live longer than the Env object.
   Status NewAppendableFile(const string& fname,
-                           std::unique_ptr<WritableFile>* result);
+                           std::unique_ptr<WritableFile>* result, TransactionToken* token=nullptr);
 
   /// \brief Creates a readonly region of memory with the file context.
   ///
@@ -154,39 +154,39 @@ class Env {
   /// and the object should be deleted when is not used. The memory region
   /// object shouldn't live longer than the Env object.
   Status NewReadOnlyMemoryRegionFromFile(
-      const string& fname, std::unique_ptr<ReadOnlyMemoryRegion>* result);
+      const string& fname, std::unique_ptr<ReadOnlyMemoryRegion>* result, TransactionToken* token=nullptr);
 
-  Status StartTransaction(const string& filename, std::unique_ptr<TransactionToken>* token=nullptr);
-  Status EndTransaction(std::unique_ptr<TransactionToken>* token);
+  Status StartTransaction(const string& filename, TransactionToken** token=nullptr);
+  Status EndTransaction(TransactionToken* token);
   /// Returns OK if the named path exists and NOT_FOUND otherwise.
-  Status FileExists(const string& fname);
+  Status FileExists(const string& fname, TransactionToken* token=nullptr);
 
   /// Returns true if all the listed files exist, false otherwise.
   /// if status is not null, populate the vector with a detailed status
   /// for each file.
   bool FilesExist(const std::vector<string>& files,
-                  std::vector<Status>* status);
+                  std::vector<Status>* status, TransactionToken* token=nullptr);
 
   /// \brief Stores in *result the names of the children of the specified
   /// directory. The names are relative to "dir".
   ///
   /// Original contents of *results are dropped.
-  Status GetChildren(const string& dir, std::vector<string>* result);
+  Status GetChildren(const string& dir, std::vector<string>* result, TransactionToken* token=nullptr);
 
   /// \brief Returns true if the path matches the given pattern. The wildcards
   /// allowed in pattern are described in FileSystem::GetMatchingPaths.
   virtual bool MatchPath(const std::string& path,
-                         const std::string& pattern) = 0;
+                         const std::string& pattern, TransactionToken* token=nullptr) = 0;
 
   /// \brief Given a pattern, stores in *results the set of paths that matches
   /// that pattern. *results is cleared.
   ///
   /// More details about `pattern` in FileSystem::GetMatchingPaths.
   virtual Status GetMatchingPaths(const string& pattern,
-                                  std::vector<string>* results);
+                                  std::vector<string>* results, TransactionToken* token=nullptr);
 
   /// Deletes the named file.
-  Status DeleteFile(const string& fname);
+  Status DeleteFile(const string& fname, TransactionToken* token=nullptr);
 
   /// \brief Deletes the specified directory and all subdirectories and files
   /// underneath it. This is accomplished by traversing the directory tree
@@ -213,26 +213,26 @@ class Env {
   ///  * UNIMPLEMENTED - Some underlying functions (like Delete) are not
   ///                    implemented
   Status DeleteRecursively(const string& dirname, int64* undeleted_files,
-                           int64* undeleted_dirs);
+                           int64* undeleted_dirs, TransactionToken* token=nullptr);
 
   /// \brief Creates the specified directory and all the necessary
   /// subdirectories. Typical return codes.
   ///  * OK - successfully created the directory and sub directories, even if
   ///         they were already created.
   ///  * PERMISSION_DENIED - dirname or some subdirectory is not writable.
-  Status RecursivelyCreateDir(const string& dirname);
+  Status RecursivelyCreateDir(const string& dirname, TransactionToken* token=nullptr);
 
   /// \brief Creates the specified directory. Typical return codes
   ///  * OK - successfully created the directory.
   ///  * ALREADY_EXISTS - directory already exists.
   ///  * PERMISSION_DENIED - dirname is not writable.
-  Status CreateDir(const string& dirname);
+  Status CreateDir(const string& dirname, TransactionToken* token=nullptr);
 
   /// Deletes the specified directory.
-  Status DeleteDir(const string& dirname);
+  Status DeleteDir(const string& dirname, TransactionToken* token=nullptr);
 
   /// Obtains statistics for the given path.
-  Status Stat(const string& fname, FileStatistics* stat);
+  Status Stat(const string& fname, FileStatistics* stat, TransactionToken* token=nullptr);
 
   /// \brief Returns whether the given path is a directory or not.
   /// Typical return codes (not guaranteed exhaustive):
@@ -241,7 +241,7 @@ class Env {
   ///  * NOT_FOUND - The path entry does not exist.
   ///  * PERMISSION_DENIED - Insufficient permissions.
   ///  * UNIMPLEMENTED - The file factory doesn't support directories.
-  Status IsDirectory(const string& fname);
+  Status IsDirectory(const string& fname, TransactionToken* token=nullptr);
 
   /// \brief Returns whether the given path is on a file system
   /// that has atomic move capabilities. This can be used
@@ -256,14 +256,14 @@ class Env {
   Status HasAtomicMove(const string& path, bool* has_atomic_move);
 
   /// Stores the size of `fname` in `*file_size`.
-  Status GetFileSize(const string& fname, uint64* file_size);
+  Status GetFileSize(const string& fname, uint64* file_size, TransactionToken* token=nullptr);
 
   /// \brief Renames file src to target. If target already exists, it will be
   /// replaced.
-  Status RenameFile(const string& src, const string& target);
+  Status RenameFile(const string& src, const string& target, TransactionToken* token=nullptr);
 
   /// \brief Copy the src to target.
-  Status CopyFile(const string& src, const string& target);
+  Status CopyFile(const string& src, const string& target, TransactionToken* token=nullptr);
 
   /// \brief Returns the absolute path of the current executable. It resolves
   /// symlinks if there is any.
@@ -390,8 +390,8 @@ class EnvWrapper : public Env {
     return target_->RegisterFileSystem(scheme, factory);
   }
 
-  bool MatchPath(const std::string& path, const std::string& pattern) override {
-    return target_->MatchPath(path, pattern);
+  bool MatchPath(const std::string& path, const std::string& pattern, TransactionToken* token=nullptr) override {
+    return target_->MatchPath(path, pattern,token);
   }
 
   uint64 NowMicros() const override { return target_->NowMicros(); }
@@ -474,12 +474,12 @@ Status FileSystemCopyFile(FileSystem* src_fs, const string& src,
                           FileSystem* target_fs, const string& target);
 
 /// A utility routine: reads contents of named file into `*data`
-Status ReadFileToString(Env* env, const string& fname, string* data);
+Status ReadFileToString(Env* env, const string& fname, string* data, TransactionToken* token=nullptr);
 
 /// A utility routine: write contents of `data` to file named `fname`
 /// (overwriting existing contents, if any).
 Status WriteStringToFile(Env* env, const string& fname,
-                         const StringPiece& data);
+                         const StringPiece& data, TransactionToken* token=nullptr);
 
 /// Write binary representation of "proto" to the named file.
 Status WriteBinaryProto(Env* env, const string& fname,

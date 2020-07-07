@@ -90,7 +90,7 @@ class WindowsEnv : public Env {
     LOG(FATAL) << "Env::Default() must not be destroyed";
   }
 
-  bool MatchPath(const string& path, const string& pattern) override {
+  bool MatchPath(const string& path, const string& pattern, TransactionToken* token=nullptr) override {
     std::wstring ws_path(Utf8ToWideChar(path));
     std::wstring ws_pattern(Utf8ToWideChar(pattern));
     return PathMatchSpecW(ws_path.c_str(), ws_pattern.c_str()) == TRUE;
