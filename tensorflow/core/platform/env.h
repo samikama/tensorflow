@@ -156,8 +156,6 @@ class Env {
   Status NewReadOnlyMemoryRegionFromFile(
       const string& fname, std::unique_ptr<ReadOnlyMemoryRegion>* result, TransactionToken* token=nullptr);
 
-  Status StartTransaction(const string& filename, TransactionToken** token=nullptr);
-  Status EndTransaction(TransactionToken* token);
   /// Returns OK if the named path exists and NOT_FOUND otherwise.
   Status FileExists(const string& fname, TransactionToken* token=nullptr);
 
@@ -264,6 +262,27 @@ class Env {
 
   /// \brief Copy the src to target.
   Status CopyFile(const string& src, const string& target, TransactionToken* token=nullptr);
+
+  /// \brief Start a new transaction. `path` is not added to transaction.
+  Status StartTransaction(const string& path, TransactionToken** token);
+
+  /// \brief End transaction.
+  Status EndTransaction(TransactionToken* token);
+
+  /// \brief Adds a new file or directory to transaction `token`.
+  Status AddToTransaction(const string& path, TransactionToken* token);
+
+  /// \brief `token` is set to transaction owning the `path` or nullptr if path
+  /// is not in any transactions.
+  Status GetTransactionForPath(const string& path, TransactionToken** token);
+
+  /// \brief Return a `token` either to an existing or a new transaction
+  /// containing `path`
+  Status GetTokenOrStartTransaction(const string& path,
+                                    TransactionToken** token);
+
+  /// \brief Decode `token` to human readable format
+  string DecodeTransactionToken(TransactionToken* token);
 
   /// \brief Returns the absolute path of the current executable. It resolves
   /// symlinks if there is any.

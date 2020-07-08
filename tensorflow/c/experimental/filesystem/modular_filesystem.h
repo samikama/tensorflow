@@ -16,9 +16,11 @@ limitations under the License.
 #define TENSORFLOW_C_EXPERIMENTAL_FILESYSTEM_MODULAR_FILESYSTEM_H_
 
 #include <memory>
+#include <unordered_map>
 
 #include "tensorflow/c/experimental/filesystem/filesystem_interface.h"
 #include "tensorflow/core/platform/file_system.h"
+#include "tensorflow/core/platform/mutex.h"
 
 /// This file builds classes needed to hold a filesystem implementation in the
 /// modular world. Once all TensorFlow filesystems are converted to use the
@@ -61,34 +63,40 @@ class ModularFileSystem final : public FileSystem {
 
   Status NewRandomAccessFile(
       const std::string& fname,
-      std::unique_ptr<RandomAccessFile>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
+      std::unique_ptr<RandomAccessFile>* result, TransactionToken* token=nullptr) override;
   Status NewWritableFile(const std::string& fname,
-                         std::unique_ptr<WritableFile>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
+                         std::unique_ptr<WritableFile>* result, TransactionToken* token=nullptr) override;
   Status NewAppendableFile(const std::string& fname,
-                           std::unique_ptr<WritableFile>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
+                           std::unique_ptr<WritableFile>* result, TransactionToken* token=nullptr) override;
   Status NewReadOnlyMemoryRegionFromFile(
       const std::string& fname,
-      std::unique_ptr<ReadOnlyMemoryRegion>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
-  Status FileExists(const std::string& fname, std::unique_ptr<TransactionToken>* token=nullptr) override;
+      std::unique_ptr<ReadOnlyMemoryRegion>* result, TransactionToken* token=nullptr) override;
+  Status FileExists(const std::string& fname, TransactionToken* token=nullptr) override;
   bool FilesExist(const std::vector<std::string>& files,
-                  std::vector<Status>* status, std::unique_ptr<TransactionToken>* token=nullptr) override;
+                  std::vector<Status>* status, TransactionToken* token=nullptr) override;
   Status GetChildren(const std::string& dir,
-                     std::vector<std::string>* result, std::unique_ptr<TransactionToken>* token=nullptr) override;
+                     std::vector<std::string>* result, TransactionToken* token=nullptr) override;
   Status GetMatchingPaths(const std::string& pattern,
-                          std::vector<std::string>* results, std::unique_ptr<TransactionToken>* token=nullptr) override;
-  Status DeleteFile(const std::string& fname, std::unique_ptr<TransactionToken>* token=nullptr) override;
+                          std::vector<std::string>* results, TransactionToken* token=nullptr) override;
+  Status DeleteFile(const std::string& fname, TransactionToken* token=nullptr) override;
   Status DeleteRecursively(const std::string& dirname, int64* undeleted_files,
-                           int64* undeleted_dirs, std::unique_ptr<TransactionToken>* token=nullptr) override;
-  Status DeleteDir(const std::string& dirname, std::unique_ptr<TransactionToken>* token=nullptr) override;
-  Status RecursivelyCreateDir(const std::string& dirname, std::unique_ptr<TransactionToken>* token=nullptr) override;
-  Status CreateDir(const std::string& dirname, std::unique_ptr<TransactionToken>* token=nullptr) override;
-  Status Stat(const std::string& fname, FileStatistics* stat, std::unique_ptr<TransactionToken>* token=nullptr) override;
-  Status IsDirectory(const std::string& fname, std::unique_ptr<TransactionToken>* token=nullptr) override;
-  Status GetFileSize(const std::string& fname, uint64* file_size, std::unique_ptr<TransactionToken>* token=nullptr) override;
-  Status RenameFile(const std::string& src, const std::string& target, std::unique_ptr<TransactionToken>* token=nullptr) override;
-  Status CopyFile(const std::string& src, const std::string& target, std::unique_ptr<TransactionToken>* token=nullptr) override;
+                           int64* undeleted_dirs, TransactionToken* token=nullptr) override;
+  Status DeleteDir(const std::string& dirname, TransactionToken* token=nullptr) override;
+  Status RecursivelyCreateDir(const std::string& dirname, TransactionToken* token=nullptr) override;
+  Status CreateDir(const std::string& dirname, TransactionToken* token=nullptr) override;
+  Status Stat(const std::string& fname, FileStatistics* stat, TransactionToken* token=nullptr) override;
+  Status IsDirectory(const std::string& fname, TransactionToken* token=nullptr) override;
+  Status GetFileSize(const std::string& fname, uint64* file_size, TransactionToken* token=nullptr) override;
+  Status RenameFile(const std::string& src, const std::string& target, TransactionToken* token=nullptr) override;
+  Status CopyFile(const std::string& src, const std::string& target, TransactionToken* token=nullptr) override;
   std::string TranslateName(const std::string& name) const override;
-  void FlushCaches(std::unique_ptr<TransactionToken>* token=nullptr) override;
+  void FlushCaches(TransactionToken* token=nullptr) override;
+  Status StartTransaction(TransactionToken** token) override;
+  Status EndTransaction(TransactionToken* token) override;
+  Status AddToTransaction(const string& path, TransactionToken* token) override;
+  Status GetTransactionForPath(const string& path, TransactionToken** token) override;
+  Status GetTokenOrStartTransaction(const string& path,TransactionToken** token) override;
+  string DecodeTransaction(TransactionToken* token)override;
 
  private:
   std::unique_ptr<TF_Filesystem> filesystem_;
@@ -99,6 +107,8 @@ class ModularFileSystem final : public FileSystem {
       read_only_memory_region_ops_;
   std::function<void*(size_t)> plugin_memory_allocate_;
   std::function<void(void*)> plugin_memory_free_;
+  mutex transaction_mutex_;
+  std::unordered_map<TF_TransactionToken*,TransactionToken*> transaction_map_;
   TF_DISALLOW_COPY_AND_ASSIGN(ModularFileSystem);
 };
 

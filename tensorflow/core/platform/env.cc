@@ -151,15 +151,41 @@ Status Env::FlushFileSystemCaches() {
   }
   return Status::OK();
 }
-Status Env::StartTransaction(const string& fname, TransactionToken** token){
+Status Env::StartTransaction(const string& path, TransactionToken** token) {
   FileSystem* fs;
-  TF_RETURN_IF_ERROR(GetFileSystemForFile(fname, &fs));
-  return fs->StartTransaction(fname, token);
+  TF_RETURN_IF_ERROR(GetFileSystemForFile(path, &fs));
+  return fs->StartTransaction(token);
 }
 
-Status Env::EndTransaction(TransactionToken* token){
-  if(token)
-  return token->owner->EndTransaction(token);
+Status Env::EndTransaction(TransactionToken* token) {
+  if (token) return token->owner->EndTransaction(token);
+  return Status::OK();
+}
+
+Status Env::AddToTransaction(const string& path, TransactionToken* token) {
+  if (!token) {
+    return Status::OK();
+  }
+  return token->owner->AddToTransaction(path, token);
+}
+
+Status Env::GetTransactionForPath(const string& path,
+                                  TransactionToken** token) {
+  FileSystem* fs;
+  TF_RETURN_IF_ERROR(GetFileSystemForFile(path, &fs));
+  return fs->GetTransactionForPath(path, token);
+}
+
+Status Env::GetTokenOrStartTransaction(const string& path,
+                                       TransactionToken** token) {
+  FileSystem* fs;
+  TF_RETURN_IF_ERROR(GetFileSystemForFile(path, &fs));
+  return fs->GetTokenOrStartTransaction(path, token);
+}
+
+string Env::DecodeTransactionToken(TransactionToken* token) {
+  if (!token) return "No Token!";
+  return token->owner->DecodeTransaction(token);
 }
 
 Status Env::NewRandomAccessFile(const string& fname,

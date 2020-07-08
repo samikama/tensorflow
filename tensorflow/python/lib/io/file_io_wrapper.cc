@@ -215,18 +215,61 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
       },
       py::arg("filename"), py::arg("token") = (TransactionToken*)nullptr);
 
-  m.def("StartTransaction",
-        [](const std::string& filename) -> TransactionToken* {
-          TransactionToken* self=nullptr;
-          const auto status =
-              tensorflow::Env::Default()->StartTransaction(filename, &self);
-          tensorflow::MaybeRaiseRegisteredFromStatus(status);
-          return self;
-        });
+  m.def("StartTransaction", [](const std::string& path) -> TransactionToken* {
+    py::gil_scoped_release release;
+    TransactionToken* self = nullptr;
+    const auto status =
+        tensorflow::Env::Default()->StartTransaction(path, &self);
+    py::gil_scoped_acquire acquire;
+    tensorflow::MaybeRaiseRegisteredFromStatus(status);
+    return self;
+  });
 
   m.def("EndTransaction", [](TransactionToken* token) {
+    py::gil_scoped_release release;
     const auto status = tensorflow::Env::Default()->EndTransaction(token);
+    py::gil_scoped_acquire acquire;
     tensorflow::MaybeRaiseRegisteredFromStatus(status);
+  });
+
+  m.def("AddToTransaction",
+        [](const std::string& path, TransactionToken* token) {
+          py::gil_scoped_release release;
+          const auto status =
+              tensorflow::Env::Default()->AddToTransaction(path, token);
+          py::gil_scoped_acquire acquire;
+          tensorflow::MaybeRaiseRegisteredFromStatus(status);
+        });
+
+  m.def("GetTransactionForPath",
+        [](const std::string& path) -> TransactionToken* {
+          py::gil_scoped_release release;
+          TransactionToken* token = nullptr;
+          const auto status =
+              tensorflow::Env::Default()->GetTransactionForPath(path, &token);
+          py::gil_scoped_acquire acquire;
+          tensorflow::MaybeRaiseRegisteredFromStatus(status);
+          return token;
+        });
+
+  m.def("GetTokenOrStartTransaction",
+        [](const std::string& path) -> TransactionToken* {
+          py::gil_scoped_release release;
+          TransactionToken* token = nullptr;
+          const auto status =
+              tensorflow::Env::Default()->GetTokenOrStartTransaction(path,
+                                                                     &token);
+          py::gil_scoped_acquire acquire;
+          tensorflow::MaybeRaiseRegisteredFromStatus(status);
+          return token;
+        });
+
+  m.def("DecodeTransactionToken", [](TransactionToken* token) -> std::string {
+    py::gil_scoped_release release;
+    std::string result =
+        tensorflow::Env::Default()->DecodeTransactionToken(token);
+    py::gil_scoped_acquire acquire;
+    return result;
   });
 
   using tensorflow::WritableFile;

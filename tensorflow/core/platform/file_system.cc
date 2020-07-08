@@ -437,4 +437,12 @@ string FileSystem::CreateURI(StringPiece scheme, StringPiece host,
   return strings::StrCat(scheme, "://", host, path);
 }
 
+string FileSystem::DecodeTransaction(TransactionToken* token){
+  if(token){
+    std::stringstream oss;
+    oss<<"Token= "<<token->token<<", Owner="<<token->owner;
+    return oss.str();
+  }
+  return "No Transaction";
+}
 }  // namespace tensorflow

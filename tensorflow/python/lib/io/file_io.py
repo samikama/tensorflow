@@ -36,11 +36,11 @@ _DEFAULT_BLOCK_SIZE = 16 * 1024 * 1024
 
 @tf_contextlib.contextmanager
 def transaction_scope(name=""):
-  token = StartTransaction(name)
+  token = start_transaction(name)
   try:
     yield token
   finally:
-    EndTransaction(token)
+    end_transaction(token)
 
 class FileIO(object):
   """FileIO class that exposes methods to read / write to / from files.
@@ -727,11 +727,76 @@ def walk(top, in_order=True, transaction_token=None):
   """
   return walk_v2(top, in_order, transaction_token)
 
-def StartTransaction(name=""):
+
+def start_transaction(name):
+  """Start a new transaction with filesystem containing name and return transaction token
+  
+  Args:
+    name: string, a URI that can be used to identify filesystem
+
+  Returns:
+    A transaction token
+  """
   return _pywrap_file_io.StartTransaction(name)
 
-def EndTransaction(token=None):
+
+def end_transaction(token):
+  """ Finalize the transaction
+  
+  Args:
+    token: TransactionToken instance constructed by 
+    `start_transaction` or `get_token_or_start_transaction` call.
+
+  """
   return _pywrap_file_io.EndTransaction(token)
+
+
+def add_to_transaction(name, token):
+  """Add `name` to transaction in `token`.
+  
+  Args:
+    name: string, a file or directory name in the filesystem of token.
+    token: TransactionToken instance created earlier.
+  """
+  return _pywrap_file_io.AddToTransaction(name, token)
+
+
+def get_transaction_for_path(name):
+  """Get TransactionToken for `name`.
+  
+  Args:
+    name: string, a file or directory name in the filesystem of token.
+
+  Returns:
+    TransactionToken if name is in a transaction, None otherwise.
+  """
+
+  return _pywrap_file_io.GetTransactionForPath(name)
+
+
+def get_token_or_start_transaction(name):
+  """Get TransactionToken for `name` or start a new transaction and `name` to it.
+  
+  Args:
+    name: string, a file or directory name in the filesystem of token.
+
+  Returns:
+    TransactionToken instance.
+  """
+  return _pywrap_file_io.GetTokenOrStartTransaction(name)
+
+
+def decode_transaction_token(token):
+  """Decode TransactionToken in `token` to a human readable string.
+  
+  Args:
+    token: TransactionToken instance created earlier.
+
+  Returns:
+    A string describing the token as constructed by FileSystem.
+  """
+  return _pywrap_file_io.DecodeTransactionToken(token)
+
 
 @tf_export("io.gfile.walk")
 def walk_v2(top, topdown=True, onerror=None, transaction_token=None):
