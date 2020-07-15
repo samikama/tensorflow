@@ -282,7 +282,7 @@ class Env {
                                     TransactionToken** token);
 
   /// \brief Decode `token` to human readable format
-  string DecodeTransactionToken(TransactionToken* token);
+  string DecodeTransaction(TransactionToken* token);
 
   /// \brief Returns the absolute path of the current executable. It resolves
   /// symlinks if there is any.

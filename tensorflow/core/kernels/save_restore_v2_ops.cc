@@ -237,6 +237,17 @@ class MergeV2Checkpoints : public OpKernel {
         gtl::ArraySlice<tstring>(checkpoint_prefixes.flat<tstring>());
     Env* env = Env::Default();
     const string& merged_prefix = destination_prefix.scalar<tstring>()();
+    auto token_deleter = [env](TransactionToken* token) {
+      if (token) {
+        env->EndTransaction(token);
+      }
+    };
+    TransactionToken* token = nullptr;
+    env->GetTokenOrStartTransaction(string(io::Dirname(input_prefixes[0])), &token);
+    auto token_scope =
+        std::unique_ptr<TransactionToken, decltype(token_deleter)>(
+            token, token_deleter);
+    env->AddToTransaction(string(io::Dirname(merged_prefix)), token);
     OP_REQUIRES_OK(
         context, tensorflow::MergeBundles(env, input_prefixes, merged_prefix));
 

@@ -96,7 +96,7 @@ class ModularFileSystem final : public FileSystem {
   Status AddToTransaction(const string& path, TransactionToken* token) override;
   Status GetTransactionForPath(const string& path, TransactionToken** token) override;
   Status GetTokenOrStartTransaction(const string& path,TransactionToken** token) override;
-  string DecodeTransaction(TransactionToken* token)override;
+  string DecodeTransaction(const TransactionToken* token)override;
 
  private:
   std::unique_ptr<TF_Filesystem> filesystem_;

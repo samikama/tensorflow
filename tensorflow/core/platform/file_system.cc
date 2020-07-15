@@ -437,7 +437,7 @@ string FileSystem::CreateURI(StringPiece scheme, StringPiece host,
   return strings::StrCat(scheme, "://", host, path);
 }
 
-string FileSystem::DecodeTransaction(TransactionToken* token){
+string FileSystem::DecodeTransaction(const TransactionToken* token){
   if(token){
     std::stringstream oss;
     oss<<"Token= "<<token->token<<", Owner="<<token->owner;

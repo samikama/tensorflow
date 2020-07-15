@@ -35,7 +35,7 @@ from tensorflow.python.util import tf_contextlib
 _DEFAULT_BLOCK_SIZE = 16 * 1024 * 1024
 
 @tf_contextlib.contextmanager
-def transaction_scope(name=""):
+def transaction_scope(name):
   token = start_transaction(name)
   try:
     yield token
@@ -55,13 +55,13 @@ class FileIO(object):
   the file line by line is 1024 * 512 bytes.
   """
 
-  def __init__(self, name, mode, transaction_token=None):
+  def __init__(self, name, mode, transaction=None):
     self.__name = name
     self.__mode = mode
     self._read_buf = None
     self._writable_file = None
     self._binary_mode = "b" in mode
-    self._token = transaction_token
+    self._token = transaction
     mode = mode.replace("b", "")
     if mode not in ("r", "w", "a", "r+", "w+", "a+"):
       raise errors.InvalidArgumentError(
@@ -85,7 +85,7 @@ class FileIO(object):
         raise errors.PermissionDeniedError(None, None,
                                            "File isn't open for reading")
       self._read_buf = _pywrap_file_io.BufferedInputStream(
-          self.__name, 1024 * 512)
+          self.__name, 1024 * 512, self._token)
 
   def _prewrite_check(self):
     if not self._writable_file:
@@ -93,7 +93,8 @@ class FileIO(object):
         raise errors.PermissionDeniedError(None, None,
                                            "File isn't open for writing")
       self._writable_file = _pywrap_file_io.WritableFile(
-          compat.as_bytes(self.__name), compat.as_bytes(self.__mode))
+          compat.as_bytes(self.__name), compat.as_bytes(self.__mode),
+          self._token)
 
   def _prepare_value(self, val):
     if self._binary_mode:
@@ -242,7 +243,7 @@ class FileIO(object):
 
 
 @tf_export(v1=["gfile.Exists"])
-def file_exists(filename, transaction_token=None):
+def file_exists(filename, transaction=None):
   """Determines whether a path exists or not.
 
   Args:
@@ -255,11 +256,11 @@ def file_exists(filename, transaction_token=None):
   Raises:
     errors.OpError: Propagates any errors reported by the FileSystem API.
   """
-  return file_exists_v2(filename, transaction_token)
+  return file_exists_v2(filename, transaction)
 
 
 @tf_export("io.gfile.exists")
-def file_exists_v2(path, transaction_token=None):
+def file_exists_v2(path, transaction=None):
   """Determines whether a path exists or not.
 
   Args:
@@ -273,14 +274,14 @@ def file_exists_v2(path, transaction_token=None):
     errors.OpError: Propagates any errors reported by the FileSystem API.
   """
   try:
-    _pywrap_file_io.FileExists(compat.as_bytes(path), transaction_token)
+    _pywrap_file_io.FileExists(compat.as_bytes(path), transaction)
   except errors.NotFoundError:
     return False
   return True
 
 
 @tf_export(v1=["gfile.Remove"])
-def delete_file(filename, transaction_token=None):
+def delete_file(filename, transaction=None):
   """Deletes the file located at 'filename'.
 
   Args:
@@ -290,11 +291,11 @@ def delete_file(filename, transaction_token=None):
     errors.OpError: Propagates any errors reported by the FileSystem API.  E.g.,
     `NotFoundError` if the file does not exist.
   """
-  delete_file_v2(filename, transaction_token)
+  delete_file_v2(filename, transaction)
 
 
 @tf_export("io.gfile.remove")
-def delete_file_v2(path, transaction_token=None):
+def delete_file_v2(path, transaction=None):
   """Deletes the path located at 'path'.
 
   Args:
@@ -304,10 +305,10 @@ def delete_file_v2(path, transaction_token=None):
     errors.OpError: Propagates any errors reported by the FileSystem API.  E.g.,
     `NotFoundError` if the path does not exist.
   """
-  _pywrap_file_io.DeleteFile(compat.as_bytes(path), transaction_token)
+  _pywrap_file_io.DeleteFile(compat.as_bytes(path), transaction)
 
 
-def read_file_to_string(filename, binary_mode=False, transaction_token=None):
+def read_file_to_string(filename, binary_mode=False, transaction=None):
   """Reads the entire contents of a file to a string.
 
   Args:
@@ -323,13 +324,13 @@ def read_file_to_string(filename, binary_mode=False, transaction_token=None):
     `NotFoundError` etc.
   """
   if binary_mode:
-    f = FileIO(filename, mode="rb", transaction_token=transaction_token)
+    f = FileIO(filename, mode="rb", transaction=transaction)
   else:
-    f = FileIO(filename, mode="r", transaction_token=transaction_token)
+    f = FileIO(filename, mode="r", transaction=transaction)
   return f.read()
 
 
-def write_string_to_file(filename, file_content, transaction_token=None):
+def write_string_to_file(filename, file_content, transaction=None):
   """Writes a string to a given file.
 
   Args:
@@ -339,12 +340,12 @@ def write_string_to_file(filename, file_content, transaction_token=None):
   Raises:
     errors.OpError: If there are errors during the operation.
   """
-  with FileIO(filename, mode="w", transaction_token=transaction_token) as f:
+  with FileIO(filename, mode="w", transaction=transaction) as f:
     f.write(file_content)
 
 
 @tf_export(v1=["gfile.Glob"])
-def get_matching_files(filename, transaction_token=None):
+def get_matching_files(filename, transaction=None):
   """Returns a list of files that match the given pattern(s).
 
   Args:
@@ -356,11 +357,11 @@ def get_matching_files(filename, transaction_token=None):
   Raises:
   *  errors.OpError: If there are filesystem / directory listing errors.
   """
-  return get_matching_files_v2(filename, transaction_token)
+  return get_matching_files_v2(filename, transaction)
 
 
 @tf_export("io.gfile.glob")
-def get_matching_files_v2(pattern, transaction_token=None):
+def get_matching_files_v2(pattern, transaction=None):
   r"""Returns a list of files that match the given pattern(s).
 
   The patterns are defined as strings. Supported patterns are defined
@@ -415,7 +416,7 @@ def get_matching_files_v2(pattern, transaction_token=None):
         # Convert the filenames to string from bytes.
         compat.as_str_any(matching_filename)
         for matching_filename in _pywrap_file_io.GetMatchingFiles(
-            compat.as_bytes(pattern), transaction_token)
+            compat.as_bytes(pattern), transaction)
     ]
   else:
     return [
@@ -423,12 +424,12 @@ def get_matching_files_v2(pattern, transaction_token=None):
         compat.as_str_any(matching_filename)  # pylint: disable=g-complex-comprehension
         for single_filename in pattern
         for matching_filename in _pywrap_file_io.GetMatchingFiles(
-            compat.as_bytes(single_filename), transaction_token)
+            compat.as_bytes(single_filename), transaction)
     ]
 
 
 @tf_export(v1=["gfile.MkDir"])
-def create_dir(dirname, transaction_token=None):
+def create_dir(dirname, transaction=None):
   """Creates a directory with the name `dirname`.
 
   Args:
@@ -440,11 +441,11 @@ def create_dir(dirname, transaction_token=None):
   Raises:
     errors.OpError: If the operation fails.
   """
-  create_dir_v2(dirname, transaction_token)
+  create_dir_v2(dirname, transaction)
 
 
 @tf_export("io.gfile.mkdir")
-def create_dir_v2(path, transaction_token=None):
+def create_dir_v2(path, transaction=None):
   """Creates a directory with the name given by `path`.
 
   Args:
@@ -456,11 +457,11 @@ def create_dir_v2(path, transaction_token=None):
   Raises:
     errors.OpError: If the operation fails.
   """
-  _pywrap_file_io.CreateDir(compat.as_bytes(path), transaction_token)
+  _pywrap_file_io.CreateDir(compat.as_bytes(path), transaction)
 
 
 @tf_export(v1=["gfile.MakeDirs"])
-def recursive_create_dir(dirname, transaction_token=None):
+def recursive_create_dir(dirname, transaction=None):
   """Creates a directory and all parent/intermediate directories.
 
   It succeeds if dirname already exists and is writable.
@@ -471,11 +472,11 @@ def recursive_create_dir(dirname, transaction_token=None):
   Raises:
     errors.OpError: If the operation fails.
   """
-  recursive_create_dir_v2(dirname, transaction_token)
+  recursive_create_dir_v2(dirname, transaction)
 
 
 @tf_export("io.gfile.makedirs")
-def recursive_create_dir_v2(path, transaction_token=None):
+def recursive_create_dir_v2(path, transaction=None):
   """Creates a directory and all parent/intermediate directories.
 
   It succeeds if path already exists and is writable.
@@ -486,11 +487,11 @@ def recursive_create_dir_v2(path, transaction_token=None):
   Raises:
     errors.OpError: If the operation fails.
   """
-  _pywrap_file_io.RecursivelyCreateDir(compat.as_bytes(path), transaction_token)
+  _pywrap_file_io.RecursivelyCreateDir(compat.as_bytes(path), transaction)
 
 
 @tf_export(v1=["gfile.Copy"])
-def copy(oldpath, newpath, overwrite=False, transaction_token=None):
+def copy(oldpath, newpath, overwrite=False, transaction=None):
   """Copies data from `oldpath` to `newpath`.
 
   Args:
@@ -502,11 +503,11 @@ def copy(oldpath, newpath, overwrite=False, transaction_token=None):
   Raises:
     errors.OpError: If the operation fails.
   """
-  copy_v2(oldpath, newpath, overwrite, transaction_token)
+  copy_v2(oldpath, newpath, overwrite, transaction)
 
 
 @tf_export("io.gfile.copy")
-def copy_v2(src, dst, overwrite=False, transaction_token=None):
+def copy_v2(src, dst, overwrite=False, transaction=None):
   """Copies data from `src` to `dst`.
 
   Args:
@@ -519,11 +520,11 @@ def copy_v2(src, dst, overwrite=False, transaction_token=None):
     errors.OpError: If the operation fails.
   """
   _pywrap_file_io.CopyFile(
-      compat.as_bytes(src), compat.as_bytes(dst), overwrite, transaction_token)
+      compat.as_bytes(src), compat.as_bytes(dst), overwrite, transaction)
 
 
 @tf_export(v1=["gfile.Rename"])
-def rename(oldname, newname, overwrite=False, transaction_token=None):
+def rename(oldname, newname, overwrite=False, transaction=None):
   """Rename or move a file / directory.
 
   Args:
@@ -535,11 +536,11 @@ def rename(oldname, newname, overwrite=False, transaction_token=None):
   Raises:
     errors.OpError: If the operation fails.
   """
-  rename_v2(oldname, newname, overwrite, transaction_token)
+  rename_v2(oldname, newname, overwrite, transaction)
 
 
 @tf_export("io.gfile.rename")
-def rename_v2(src, dst, overwrite=False, transaction_token=None):
+def rename_v2(src, dst, overwrite=False, transaction=None):
   """Rename or move a file / directory.
 
   Args:
@@ -552,10 +553,10 @@ def rename_v2(src, dst, overwrite=False, transaction_token=None):
     errors.OpError: If the operation fails.
   """
   _pywrap_file_io.RenameFile(
-      compat.as_bytes(src), compat.as_bytes(dst), overwrite, transaction_token)
+      compat.as_bytes(src), compat.as_bytes(dst), overwrite, transaction)
 
 
-def atomic_write_string_to_file(filename, contents, overwrite=True, transaction_token=None):
+def atomic_write_string_to_file(filename, contents, overwrite=True, transaction=None):
   """Writes to `filename` atomically.
 
   This means that when `filename` appears in the filesystem, it will contain
@@ -571,19 +572,19 @@ def atomic_write_string_to_file(filename, contents, overwrite=True, transaction_
       an existing file.
   """
   if not has_atomic_move(filename):
-    write_string_to_file(filename, contents, transaction_token)
+    write_string_to_file(filename, contents, transaction)
   else:
     temp_pathname = filename + ".tmp" + uuid.uuid4().hex
-    write_string_to_file(temp_pathname, contents, transaction_token)
+    write_string_to_file(temp_pathname, contents, transaction)
     try:
-      rename(temp_pathname, filename, overwrite, transaction_token)
+      rename(temp_pathname, filename, overwrite, transaction)
     except errors.OpError:
-      delete_file(temp_pathname, transaction_token)
+      delete_file(temp_pathname, transaction)
       raise
 
 
 @tf_export(v1=["gfile.DeleteRecursively"])
-def delete_recursively(dirname, transaction_token=None):
+def delete_recursively(dirname, transaction=None):
   """Deletes everything under dirname recursively.
 
   Args:
@@ -592,11 +593,11 @@ def delete_recursively(dirname, transaction_token=None):
   Raises:
     errors.OpError: If the operation fails.
   """
-  delete_recursively_v2(dirname, transaction_token)
+  delete_recursively_v2(dirname, transaction)
 
 
 @tf_export("io.gfile.rmtree")
-def delete_recursively_v2(path, transaction_token=None):
+def delete_recursively_v2(path, transaction=None):
   """Deletes everything under path recursively.
 
   Args:
@@ -605,11 +606,11 @@ def delete_recursively_v2(path, transaction_token=None):
   Raises:
     errors.OpError: If the operation fails.
   """
-  _pywrap_file_io.DeleteRecursively(compat.as_bytes(path), transaction_token)
+  _pywrap_file_io.DeleteRecursively(compat.as_bytes(path), transaction)
 
 
 @tf_export(v1=["gfile.IsDirectory"])
-def is_directory(dirname, transaction_token=None):
+def is_directory(dirname, transaction=None):
   """Returns whether the path is a directory or not.
 
   Args:
@@ -618,11 +619,11 @@ def is_directory(dirname, transaction_token=None):
   Returns:
     True, if the path is a directory; False otherwise
   """
-  return is_directory_v2(dirname, transaction_token)
+  return is_directory_v2(dirname, transaction)
 
 
 @tf_export("io.gfile.isdir")
-def is_directory_v2(path, transaction_token=None):
+def is_directory_v2(path, transaction=None):
   """Returns whether the path is a directory or not.
 
   Args:
@@ -632,12 +633,12 @@ def is_directory_v2(path, transaction_token=None):
     True, if the path is a directory; False otherwise
   """
   try:
-    return _pywrap_file_io.IsDirectory(compat.as_bytes(path), transaction_token)
+    return _pywrap_file_io.IsDirectory(compat.as_bytes(path), transaction)
   except errors.OpError:
     return False
 
 
-def has_atomic_move(path, transaction_token=None):
+def has_atomic_move(path, transaction=None):
   """Checks whether the file system supports atomic moves.
 
   Returns whether or not the file system of the given path supports the atomic
@@ -655,14 +656,14 @@ def has_atomic_move(path, transaction_token=None):
            not to use temporary locations in this case.
   """
   try:
-    return _pywrap_file_io.HasAtomicMove(compat.as_bytes(path), transaction_token)
+    return _pywrap_file_io.HasAtomicMove(compat.as_bytes(path))
   except errors.OpError:
     # defaults to True
     return True
 
 
 @tf_export(v1=["gfile.ListDirectory"])
-def list_directory(dirname, transaction_token=None):
+def list_directory(dirname, transaction=None):
   """Returns a list of entries contained within a directory.
 
   The list is in arbitrary order. It does not contain the special entries "."
@@ -677,11 +678,11 @@ def list_directory(dirname, transaction_token=None):
   Raises:
     errors.NotFoundError if directory doesn't exist
   """
-  return list_directory_v2(dirname, transaction_token)
+  return list_directory_v2(dirname, transaction)
 
 
 @tf_export("io.gfile.listdir")
-def list_directory_v2(path, transaction_token=None):
+def list_directory_v2(path, transaction=None):
   """Returns a list of entries contained within a directory.
 
   The list is in arbitrary order. It does not contain the special entries "."
@@ -696,7 +697,7 @@ def list_directory_v2(path, transaction_token=None):
   Raises:
     errors.NotFoundError if directory doesn't exist
   """
-  if not is_directory(path, transaction_token):
+  if not is_directory(path, transaction):
     raise errors.NotFoundError(
         node_def=None,
         op=None,
@@ -706,12 +707,12 @@ def list_directory_v2(path, transaction_token=None):
   # vector of string should be interpreted as strings, not bytes.
   return [
       compat.as_str_any(filename)
-      for filename in _pywrap_file_io.GetChildren(compat.as_bytes(path), transaction_token)
+      for filename in _pywrap_file_io.GetChildren(compat.as_bytes(path), transaction)
   ]
 
 
 @tf_export(v1=["gfile.Walk"])
-def walk(top, in_order=True, transaction_token=None):
+def walk(top, in_order=True, transaction=None):
   """Recursive directory tree generator for directories.
 
   Args:
@@ -725,7 +726,7 @@ def walk(top, in_order=True, transaction_token=None):
     `(dirname, [subdirname, subdirname, ...], [filename, filename, ...])`.
     Each item is a string.
   """
-  return walk_v2(top, in_order, transaction_token)
+  return walk_v2(top, in_order, transaction)
 
 
 def start_transaction(name):
@@ -786,7 +787,7 @@ def get_token_or_start_transaction(name):
   return _pywrap_file_io.GetTokenOrStartTransaction(name)
 
 
-def decode_transaction_token(token):
+def decode_transaction(token):
   """Decode TransactionToken in `token` to a human readable string.
   
   Args:
@@ -795,11 +796,11 @@ def decode_transaction_token(token):
   Returns:
     A string describing the token as constructed by FileSystem.
   """
-  return _pywrap_file_io.DecodeTransactionToken(token)
+  return _pywrap_file_io.DecodeTransaction(token)
 
 
 @tf_export("io.gfile.walk")
-def walk_v2(top, topdown=True, onerror=None, transaction_token=None):
+def walk_v2(top, topdown=True, onerror=None, transaction=None):
   """Recursive directory tree generator for directories.
 
   Args:
@@ -826,7 +827,7 @@ def walk_v2(top, topdown=True, onerror=None, transaction_token=None):
 
   top = compat.as_str_any(top)
   try:
-    listing = list_directory(top, transaction_token)
+    listing = list_directory(top, transaction)
   except errors.NotFoundError as err:
     if onerror:
       onerror(err)
@@ -837,7 +838,7 @@ def walk_v2(top, topdown=True, onerror=None, transaction_token=None):
   subdirs = []
   for item in listing:
     full_path = _make_full_path(top, item)
-    if is_directory(full_path, transaction_token):
+    if is_directory(full_path, transaction):
       subdirs.append(item)
     else:
       files.append(item)
@@ -857,7 +858,7 @@ def walk_v2(top, topdown=True, onerror=None, transaction_token=None):
 
 
 @tf_export(v1=["gfile.Stat"])
-def stat(filename, transaction_token=None):
+def stat(filename, transaction=None):
   """Returns file statistics for a given path.
 
   Args:
@@ -869,11 +870,11 @@ def stat(filename, transaction_token=None):
   Raises:
     errors.OpError: If the operation fails.
   """
-  return stat_v2(filename, transaction_token)
+  return stat_v2(filename, transaction)
 
 
 @tf_export("io.gfile.stat")
-def stat_v2(path, transaction_token=None):
+def stat_v2(path, transaction=None):
   """Returns file statistics for a given path.
 
   Args:
@@ -885,10 +886,10 @@ def stat_v2(path, transaction_token=None):
   Raises:
     errors.OpError: If the operation fails.
   """
-  return _pywrap_file_io.Stat(path, transaction_token)
+  return _pywrap_file_io.Stat(path, transaction)
 
 
-def filecmp(filename_a, filename_b, transaction_token=None):
+def filecmp(filename_a, filename_b, transaction=None):
   """Compare two files, returning True if they are the same, False otherwise.
 
   We check size first and return False quickly if the files are different sizes.
@@ -906,8 +907,8 @@ def filecmp(filename_a, filename_b, transaction_token=None):
   Returns:
     True if the files are the same, False otherwise.
   """
-  size_a = FileIO(filename_a, "rb", transaction_token).size()
-  size_b = FileIO(filename_b, "rb", transaction_token).size()
+  size_a = FileIO(filename_a, "rb", transaction).size()
+  size_b = FileIO(filename_b, "rb", transaction).size()
   if size_a != size_b:
     return False
 
@@ -917,7 +918,7 @@ def filecmp(filename_a, filename_b, transaction_token=None):
   return crc_a == crc_b
 
 
-def file_crc32(filename, block_size=_DEFAULT_BLOCK_SIZE, transaction_token=None):
+def file_crc32(filename, block_size=_DEFAULT_BLOCK_SIZE, transaction=None):
   """Get the crc32 of the passed file.
 
   The crc32 of a file can be used for error checking; two files with the same
@@ -933,7 +934,7 @@ def file_crc32(filename, block_size=_DEFAULT_BLOCK_SIZE, transaction_token=None)
     hexadecimal as string, the crc32 of the passed file.
   """
   crc = 0
-  with FileIO(filename, mode="rb", transaction_token=transaction_token) as f:
+  with FileIO(filename, mode="rb", transaction=transaction) as f:
     chunk = f.read(n=block_size)
     while chunk:
       crc = binascii.crc32(chunk, crc)

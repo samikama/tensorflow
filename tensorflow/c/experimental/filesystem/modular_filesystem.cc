@@ -504,7 +504,7 @@ Status ModularFileSystem::GetTokenOrStartTransaction(const string& path,
   return StatusFromTF_Status(plugin_status.get());
 }
 
-string ModularFileSystem::DecodeTransaction(TransactionToken* token) {
+string ModularFileSystem::DecodeTransaction(const TransactionToken* token) {
   if (!token) {
     return "";
   }

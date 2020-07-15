@@ -421,9 +421,10 @@ BundleWriter::BundleWriter(Env* env, StringPiece prefix, const Options& options)
   if (!status_.ok() && !errors::IsAlreadyExists(status_)) {
     return;
   }
-
+  TransactionToken* token=nullptr;
+  env->GetTokenOrStartTransaction(string(io::Dirname(prefix_)),&token).IgnoreError();
   std::unique_ptr<WritableFile> wrapper;
-  status_ = env_->NewWritableFile(data_path_, &wrapper);
+  status_ = env_->NewWritableFile(data_path_, &wrapper,token);
   if (!status_.ok()) return;
   out_ = std::unique_ptr<FileOutputBuffer>(
       new FileOutputBuffer(wrapper.release(), 8 << 20 /* 8MB write buffer */));
@@ -527,7 +528,9 @@ Status BundleWriter::Finish() {
   if (!status_.ok()) return status_;
   // Build key -> BundleEntryProto table.
   std::unique_ptr<WritableFile> file;
-  status_ = env_->NewWritableFile(metadata_path_, &file);
+  TransactionToken* token;
+  env_->GetTokenOrStartTransaction(string(io::Dirname(prefix_)),&token).IgnoreError();
+  status_ = env_->NewWritableFile(metadata_path_, &file, token);
   if (!status_.ok()) return status_;
   {
     // N.B.: the default use of Snappy compression may not be supported on all
@@ -554,7 +557,7 @@ Status BundleWriter::Finish() {
   }
   status_.Update(file->Close());
   if (!status_.ok()) {
-    Env::Default()->DeleteFile(metadata_path_).IgnoreError();
+    Env::Default()->DeleteFile(metadata_path_, token).IgnoreError();
     return status_;
   } else if (use_temp_file_) {
     status_ = Env::Default()->RenameFile(metadata_path_, MetaFilename(prefix_));
@@ -590,6 +593,8 @@ static Status MergeOneBundle(Env* env, StringPiece prefix,
                              MergeState* merge_state) {
   VLOG(1) << "Merging bundle:" << prefix;
   const string filename = MetaFilename(prefix);
+  TransactionToken* token=nullptr;
+  env->GetTokenOrStartTransaction(string(filename),&token).IgnoreError();
   uint64 file_size;
   TF_RETURN_IF_ERROR(env->GetFileSize(filename, &file_size));
   std::unique_ptr<RandomAccessFile> file;
@@ -690,7 +695,9 @@ Status MergeBundles(Env* env, gtl::ArraySlice<tstring> prefixes,
   // Merges all metadata tables.
   // TODO(zhifengc): KeyValue sorter if it becomes too big.
   MergeState merge;
-  Status status = env->CreateDir(string(io::Dirname(merged_prefix)));
+  TransactionToken *token=nullptr;
+  env->GetTokenOrStartTransaction(string(io::Dirname(prefixes[0])),&token);
+  Status status = env->CreateDir(string(io::Dirname(merged_prefix)),token);
   if (!status.ok() && !errors::IsAlreadyExists(status)) return status;
   for (int i = 0; i < prefixes.size(); ++i) {
     TF_RETURN_IF_ERROR(MergeOneBundle(env, prefixes[i], &merge));
@@ -708,7 +715,7 @@ Status MergeBundles(Env* env, gtl::ArraySlice<tstring> prefixes,
   // Writes the final metadata table under the merged prefix.
   std::unique_ptr<WritableFile> merged_metadata;
   TF_RETURN_IF_ERROR(
-      env->NewWritableFile(MetaFilename(merged_prefix), &merged_metadata));
+      env->NewWritableFile(MetaFilename(merged_prefix), &merged_metadata,token));
   {
     table::TableBuilder builder(TableBuilderOptions(), merged_metadata.get());
     // Header entry.

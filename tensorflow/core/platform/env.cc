@@ -183,7 +183,7 @@ Status Env::GetTokenOrStartTransaction(const string& path,
   return fs->GetTokenOrStartTransaction(path, token);
 }
 
-string Env::DecodeTransactionToken(TransactionToken* token) {
+string Env::DecodeTransaction(TransactionToken* token) {
   if (!token) return "No Token!";
   return token->owner->DecodeTransaction(token);
 }

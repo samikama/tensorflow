@@ -78,6 +78,8 @@ cc_library(
         "env.cc",
         "posix_file_system.cc",
         "posix_file_system.h",
+        "transactional_posix_file_system.h",
+        "transactional_posix_file_system.cc",
         "//tensorflow/core/platform:env.cc",
         "//tensorflow/core/platform:file_system.cc",
         "//tensorflow/core/platform:file_system_helper.cc",

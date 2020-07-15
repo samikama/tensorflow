@@ -32,152 +32,178 @@ limitations under the License.
 #include "tensorflow/python/lib/core/pybind11_absl.h"
 #include "tensorflow/python/lib/core/pybind11_status.h"
 
+namespace tensorflow {
+// This class is needed to manage the object lifetime in both python and c++
+// Filesystem deletes transaction when transaction ends but python object may
+// still be alive.
+struct PyTransactionToken {
+  TransactionToken* token_;
+};
+inline TransactionToken* TokenFromPyToken(PyTransactionToken* t) {
+  return (t ? t->token_ : nullptr);
+}
+}  // namespace tensorflow
 namespace {
 namespace py = pybind11;
 
 PYBIND11_MODULE(_pywrap_file_io, m) {
+  using tensorflow::PyTransactionToken;
+  using tensorflow::TokenFromPyToken;
   using tensorflow::TransactionToken;
-  py::class_<TransactionToken>(m, "TransactionToken");
+  py::class_<PyTransactionToken>(m, "TransactionToken")
+      .def("__repr__", [](const PyTransactionToken* t) {
+        if (t->token_) {
+          return std::string(t->token_->owner->DecodeTransaction(t->token_));
+        }
+        return std::string("Invalid token!");
+      });
   m.def(
       "FileExists",
-      [](const std::string& filename, TransactionToken* token) {
+      [](const std::string& filename, PyTransactionToken* py_token) {
         tensorflow::Status status;
         {
           py::gil_scoped_release release;
-          status = tensorflow::Env::Default()->FileExists(filename, token);
+          status = tensorflow::Env::Default()->FileExists(
+              filename, TokenFromPyToken(py_token));
         }
         tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
       },
-      py::arg("filename"), py::arg("token") = (TransactionToken*)nullptr);
+      py::arg("filename"), py::arg("token") = (PyTransactionToken*)nullptr);
   m.def(
       "DeleteFile",
-      [](const std::string& filename, TransactionToken* token) {
+      [](const std::string& filename, PyTransactionToken* py_token) {
         py::gil_scoped_release release;
-        tensorflow::Status status =
-            tensorflow::Env::Default()->DeleteFile(filename, token);
+        tensorflow::Status status = tensorflow::Env::Default()->DeleteFile(
+            filename, TokenFromPyToken(py_token));
         tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
       },
-      py::arg("filename"), py::arg("token") = (TransactionToken*)nullptr);
+      py::arg("filename"), py::arg("token") = (PyTransactionToken*)nullptr);
   m.def(
       "ReadFileToString",
-      [](const std::string& filename, TransactionToken* token) {
+      [](const std::string& filename, PyTransactionToken* py_token) {
         std::string data;
         py::gil_scoped_release release;
         const auto status =
-            ReadFileToString(tensorflow::Env::Default(), filename, &data, token);
+            ReadFileToString(tensorflow::Env::Default(), filename, &data,
+                             TokenFromPyToken(py_token));
         pybind11::gil_scoped_acquire acquire;
         tensorflow::MaybeRaiseRegisteredFromStatus(status);
         return py::bytes(data);
       },
-      py::arg("filename"),
-      py::arg("token") = (TransactionToken*)nullptr);
+      py::arg("filename"), py::arg("token") = (PyTransactionToken*)nullptr);
   m.def(
       "WriteStringToFile",
       [](const std::string& filename, tensorflow::StringPiece data,
-         TransactionToken* token) {
+         PyTransactionToken* py_token) {
         py::gil_scoped_release release;
         const auto status =
-            WriteStringToFile(tensorflow::Env::Default(), filename, data, token);
+            WriteStringToFile(tensorflow::Env::Default(), filename, data,
+                              TokenFromPyToken(py_token));
         tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
       },
       py::arg("filename"), py::arg("data"),
-      py::arg("token") = (TransactionToken*)nullptr);
+      py::arg("token") = (PyTransactionToken*)nullptr);
   m.def(
       "GetChildren",
-      [](const std::string& dirname, TransactionToken* token) {
+      [](const std::string& dirname, PyTransactionToken* py_token) {
         std::vector<std::string> results;
         py::gil_scoped_release release;
-        const auto status =
-            tensorflow::Env::Default()->GetChildren(dirname, &results, token);
+        const auto status = tensorflow::Env::Default()->GetChildren(
+            dirname, &results, TokenFromPyToken(py_token));
         pybind11::gil_scoped_acquire acquire;
         tensorflow::MaybeRaiseRegisteredFromStatus(status);
         return results;
       },
-      py::arg("dirname"), py::arg("token") = (TransactionToken*)nullptr);
+      py::arg("dirname"), py::arg("token") = (PyTransactionToken*)nullptr);
   m.def(
       "GetMatchingFiles",
-      [](const std::string& pattern, TransactionToken* token) {
+      [](const std::string& pattern, PyTransactionToken* py_token) {
         std::vector<std::string> results;
         py::gil_scoped_release release;
-        const auto status =
-            tensorflow::Env::Default()->GetMatchingPaths(pattern, &results, token);
+        const auto status = tensorflow::Env::Default()->GetMatchingPaths(
+            pattern, &results, TokenFromPyToken(py_token));
         pybind11::gil_scoped_acquire acquire;
         tensorflow::MaybeRaiseRegisteredFromStatus(status);
         return results;
       },
-      py::arg("pattern"), py::arg("token") = (TransactionToken*)nullptr);
+      py::arg("pattern"), py::arg("token") = (PyTransactionToken*)nullptr);
   m.def(
       "CreateDir",
-      [](const std::string& dirname, TransactionToken* token) {
+      [](const std::string& dirname, PyTransactionToken* py_token) {
         py::gil_scoped_release release;
-        const auto status = tensorflow::Env::Default()->CreateDir(dirname, token);
+        const auto status = tensorflow::Env::Default()->CreateDir(
+            dirname, TokenFromPyToken(py_token));
         if (tensorflow::errors::IsAlreadyExists(status)) {
           return;
         }
         tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
       },
-      py::arg("dirname"), py::arg("token") = (TransactionToken*)nullptr);
+      py::arg("dirname"), py::arg("token") = (PyTransactionToken*)nullptr);
   m.def(
       "RecursivelyCreateDir",
-      [](const std::string& dirname, TransactionToken* token) {
+      [](const std::string& dirname, PyTransactionToken* py_token) {
         py::gil_scoped_release release;
-        const auto status =
-            tensorflow::Env::Default()->RecursivelyCreateDir(dirname, token);
+        const auto status = tensorflow::Env::Default()->RecursivelyCreateDir(
+            dirname, TokenFromPyToken(py_token));
         tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
       },
-      py::arg("dirname"), py::arg("token") = (TransactionToken*)nullptr);
+      py::arg("dirname"), py::arg("token") = (PyTransactionToken*)nullptr);
   m.def(
       "CopyFile",
       [](const std::string& src, const std::string& target, bool overwrite,
-         TransactionToken* token) {
+         PyTransactionToken* py_token) {
         py::gil_scoped_release release;
         auto* env = tensorflow::Env::Default();
         tensorflow::Status status;
-        if (!overwrite && env->FileExists(target, token).ok()) {
+        if (!overwrite &&
+            env->FileExists(target, TokenFromPyToken(py_token)).ok()) {
           status = tensorflow::errors::AlreadyExists("file already exists");
         } else {
-          status = env->CopyFile(src, target, token);
+          status = env->CopyFile(src, target, TokenFromPyToken(py_token));
         }
         tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
       },
       py::arg("src"), py::arg("target"), py::arg("overwrite"),
-      py::arg("token") = (TransactionToken*)nullptr);
+      py::arg("token") = (PyTransactionToken*)nullptr);
   m.def(
       "RenameFile",
       [](const std::string& src, const std::string& target, bool overwrite,
-         TransactionToken* token) {
+         PyTransactionToken* py_token) {
         py::gil_scoped_release release;
         auto* env = tensorflow::Env::Default();
         tensorflow::Status status;
-        if (!overwrite && env->FileExists(target, token).ok()) {
+        if (!overwrite &&
+            env->FileExists(target, TokenFromPyToken(py_token)).ok()) {
           status = tensorflow::errors::AlreadyExists("file already exists");
         } else {
-          status = env->RenameFile(src, target, token);
+          status = env->RenameFile(src, target, TokenFromPyToken(py_token));
         }
         tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
       },
       py::arg("src"), py::arg("target"), py::arg("overwrite"),
-      py::arg("token") = (TransactionToken*)nullptr);
+      py::arg("token") = (PyTransactionToken*)nullptr);
   m.def(
       "DeleteRecursively",
-      [](const std::string& dirname, TransactionToken* token) {
+      [](const std::string& dirname, PyTransactionToken* py_token) {
         py::gil_scoped_release release;
         tensorflow::int64 undeleted_files;
         tensorflow::int64 undeleted_dirs;
         auto status = tensorflow::Env::Default()->DeleteRecursively(
-            dirname, &undeleted_files, &undeleted_dirs, token);
+            dirname, &undeleted_files, &undeleted_dirs,
+            TokenFromPyToken(py_token));
         if (status.ok() && (undeleted_files > 0 || undeleted_dirs > 0)) {
           status = tensorflow::errors::PermissionDenied(
               "could not fully delete dir");
         }
         tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
       },
-      py::arg("dirname"), py::arg("token") = (TransactionToken*)nullptr);
+      py::arg("dirname"), py::arg("token") = (PyTransactionToken*)nullptr);
   m.def(
       "IsDirectory",
-      [](const std::string& dirname, TransactionToken* token) {
+      [](const std::string& dirname, PyTransactionToken* py_token) {
         py::gil_scoped_release release;
-        const auto status = tensorflow::Env::Default()->IsDirectory(dirname, token);
+        const auto status = tensorflow::Env::Default()->IsDirectory(
+            dirname, TokenFromPyToken(py_token));
         // FAILED_PRECONDITION response means path exists but isn't a dir.
         if (tensorflow::errors::IsFailedPrecondition(status)) {
           return false;
@@ -186,7 +212,7 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
         tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
         return true;
       },
-      py::arg("dirname"), py::arg("token") = (TransactionToken*)nullptr);
+      py::arg("dirname"), py::arg("token") = (PyTransactionToken*)nullptr);
   m.def("HasAtomicMove", [](const std::string& path) {
     py::gil_scoped_release release;
     bool has_atomic_move;
@@ -203,57 +229,63 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
 
   m.def(
       "Stat",
-      [](const std::string& filename, TransactionToken* token) {
+      [](const std::string& filename, PyTransactionToken* py_token) {
         py::gil_scoped_release release;
         std::unique_ptr<tensorflow::FileStatistics> self(
             new tensorflow::FileStatistics);
-        const auto status =
-            tensorflow::Env::Default()->Stat(filename, self.get(), token);
+        const auto status = tensorflow::Env::Default()->Stat(
+            filename, self.get(), TokenFromPyToken(py_token));
         py::gil_scoped_acquire acquire;
         tensorflow::MaybeRaiseRegisteredFromStatus(status);
         return self.release();
       },
-      py::arg("filename"), py::arg("token") = (TransactionToken*)nullptr);
+      py::arg("filename"), py::arg("token") = (PyTransactionToken*)nullptr);
 
-  m.def("StartTransaction", [](const std::string& path) -> TransactionToken* {
+  m.def("StartTransaction", [](const std::string& path) -> PyTransactionToken* {
     py::gil_scoped_release release;
     TransactionToken* self = nullptr;
     const auto status =
         tensorflow::Env::Default()->StartTransaction(path, &self);
     py::gil_scoped_acquire acquire;
     tensorflow::MaybeRaiseRegisteredFromStatus(status);
-    return self;
+    PyTransactionToken* py_token = new PyTransactionToken();
+    py_token->token_ = self;
+    return py_token;
   });
 
-  m.def("EndTransaction", [](TransactionToken* token) {
+  m.def("EndTransaction", [](PyTransactionToken* py_token) {
     py::gil_scoped_release release;
-    const auto status = tensorflow::Env::Default()->EndTransaction(token);
+    const auto status =
+        tensorflow::Env::Default()->EndTransaction(TokenFromPyToken(py_token));
+    py_token->token_ = nullptr;
     py::gil_scoped_acquire acquire;
     tensorflow::MaybeRaiseRegisteredFromStatus(status);
   });
 
   m.def("AddToTransaction",
-        [](const std::string& path, TransactionToken* token) {
+        [](const std::string& path, PyTransactionToken* py_token) {
           py::gil_scoped_release release;
-          const auto status =
-              tensorflow::Env::Default()->AddToTransaction(path, token);
+          const auto status = tensorflow::Env::Default()->AddToTransaction(
+              path, TokenFromPyToken(py_token));
           py::gil_scoped_acquire acquire;
           tensorflow::MaybeRaiseRegisteredFromStatus(status);
         });
 
   m.def("GetTransactionForPath",
-        [](const std::string& path) -> TransactionToken* {
+        [](const std::string& path) -> PyTransactionToken* {
           py::gil_scoped_release release;
           TransactionToken* token = nullptr;
           const auto status =
               tensorflow::Env::Default()->GetTransactionForPath(path, &token);
           py::gil_scoped_acquire acquire;
           tensorflow::MaybeRaiseRegisteredFromStatus(status);
-          return token;
+          PyTransactionToken* py_token = new PyTransactionToken();
+          py_token->token_ = token;
+          return py_token;
         });
 
   m.def("GetTokenOrStartTransaction",
-        [](const std::string& path) -> TransactionToken* {
+        [](const std::string& path) -> PyTransactionToken* {
           py::gil_scoped_release release;
           TransactionToken* token = nullptr;
           const auto status =
@@ -261,30 +293,37 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
                                                                      &token);
           py::gil_scoped_acquire acquire;
           tensorflow::MaybeRaiseRegisteredFromStatus(status);
-          return token;
+          PyTransactionToken* py_token = new PyTransactionToken({token});
+          return py_token;
         });
 
-  m.def("DecodeTransactionToken", [](TransactionToken* token) -> std::string {
+  m.def("DecodeTransaction", [](PyTransactionToken* py_token) -> std::string {
     py::gil_scoped_release release;
-    std::string result =
-        tensorflow::Env::Default()->DecodeTransactionToken(token);
+    std::string result = tensorflow::Env::Default()->DecodeTransaction(
+        TokenFromPyToken(py_token));
     py::gil_scoped_acquire acquire;
     return result;
   });
 
   using tensorflow::WritableFile;
   py::class_<WritableFile>(m, "WritableFile")
-      .def(py::init([](const std::string& filename, const std::string& mode) {
-        py::gil_scoped_release release;
-        auto* env = tensorflow::Env::Default();
-        std::unique_ptr<WritableFile> self;
-        const auto status = mode.find("a") == std::string::npos
-                                ? env->NewWritableFile(filename, &self)
-                                : env->NewAppendableFile(filename, &self);
-        py::gil_scoped_acquire acquire;
-        tensorflow::MaybeRaiseRegisteredFromStatus(status);
-        return self.release();
-      }))
+      .def(py::init([](const std::string& filename, const std::string& mode,
+                       PyTransactionToken* token) {
+             py::gil_scoped_release release;
+             auto* env = tensorflow::Env::Default();
+             std::unique_ptr<WritableFile> self;
+             const auto status =
+                 mode.find("a") == std::string::npos
+                     ? env->NewWritableFile(filename, &self,
+                                            TokenFromPyToken(token))
+                     : env->NewAppendableFile(filename, &self,
+                                              TokenFromPyToken(token));
+             py::gil_scoped_acquire acquire;
+             tensorflow::MaybeRaiseRegisteredFromStatus(status);
+             return self.release();
+           }),
+           py::arg("filename"), py::arg("mode"),
+           py::arg("token") = (PyTransactionToken*)nullptr)
       .def("append",
            [](WritableFile* self, tensorflow::StringPiece data) {
              const auto status = self->Append(data);
@@ -312,19 +351,24 @@ PYBIND11_MODULE(_pywrap_file_io, m) {
 
   using tensorflow::io::BufferedInputStream;
   py::class_<BufferedInputStream>(m, "BufferedInputStream")
-      .def(py::init([](const std::string& filename, size_t buffer_size) {
-        py::gil_scoped_release release;
-        std::unique_ptr<tensorflow::RandomAccessFile> file;
-        const auto status =
-            tensorflow::Env::Default()->NewRandomAccessFile(filename, &file);
-        tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
-        std::unique_ptr<tensorflow::io::RandomAccessInputStream> input_stream(
-            new tensorflow::io::RandomAccessInputStream(file.release(),
-                                                        /*owns_file=*/true));
-        py::gil_scoped_acquire acquire;
-        return new BufferedInputStream(input_stream.release(), buffer_size,
-                                       /*owns_input_stream=*/true);
-      }))
+      .def(py::init([](const std::string& filename, size_t buffer_size,
+                       PyTransactionToken* token) {
+             py::gil_scoped_release release;
+             std::unique_ptr<tensorflow::RandomAccessFile> file;
+             const auto status =
+                 tensorflow::Env::Default()->NewRandomAccessFile(
+                     filename, &file, TokenFromPyToken(token));
+             tensorflow::MaybeRaiseRegisteredFromStatusWithGIL(status);
+             std::unique_ptr<tensorflow::io::RandomAccessInputStream>
+                 input_stream(new tensorflow::io::RandomAccessInputStream(
+                     file.release(),
+                     /*owns_file=*/true));
+             py::gil_scoped_acquire acquire;
+             return new BufferedInputStream(input_stream.release(), buffer_size,
+                                            /*owns_input_stream=*/true);
+           }),
+           py::arg("filename"), py::arg("buffer_size"),
+           py::arg("token") = (PyTransactionToken*)nullptr)
       .def("read",
            [](BufferedInputStream* self, tensorflow::int64 bytes_to_read) {
              py::gil_scoped_release release;

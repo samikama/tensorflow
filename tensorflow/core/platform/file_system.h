@@ -394,7 +394,7 @@ class FileSystem {
   };
 
   /// \brief Decodes transaction
-  virtual string DecodeTransaction(TransactionToken* token);
+  virtual string DecodeTransaction(const TransactionToken* token);
 
   FileSystem() {}
 
@@ -722,7 +722,7 @@ class WrappedFileSystem : public FileSystem {
   };
 
   /// \brief Decodes transaction
-  virtual string DecodeTransaction(TransactionToken* token = nullptr) override {
+  virtual string DecodeTransaction(const TransactionToken* token) override {
     return fs_->DecodeTransaction((token ? token : token_));
   }
 
