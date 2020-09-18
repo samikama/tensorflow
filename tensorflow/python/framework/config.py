@@ -171,6 +171,15 @@ def set_optimizer_jit(enabled):
   """
   context.context().optimizer_jit = enabled
 
+@tf_export('config.force_gpu_compatible')
+def force_gpu_compatible(enabled):
+  """Set if forcing gpu pinned memory CPU tensors.
+
+  Args:
+    enabled: Whether to allocate CPU tensors in GPU pinned memory.
+  """
+  context.context().force_gpu_compatible = enabled
+
 
 @tf_export('config.optimizer.get_experimental_options')
 def get_optimizer_experimental_options():

@@ -117,7 +117,7 @@ void XlaCompilationDevice::Compute(OpKernel* op_kernel,
   // wants. In practice this usually has the effect of placing things on device
   // 0.
   xla::XlaScopedShardingAssignment assign_sharding(b, op_sharding);
-  op_kernel->Compute(context);
+  op_kernel->SysCompute(parsed_name().type,context);
 
   b->ClearOpMetadata();
   VLOG(4) << "Done";
