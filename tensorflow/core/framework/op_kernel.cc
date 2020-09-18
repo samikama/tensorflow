@@ -207,7 +207,23 @@ string OpKernel::TraceString(const OpKernelContext& ctx, bool verbose) const {
 
 void AsyncOpKernel::Compute(OpKernelContext* context) {
   Notification n;
+#ifdef GOOGLE_CUDA
+  if (is_nvtx_on()) {
+    auto range = StartNvtxRange(
+        strings::StrCat("(A!) ", type_string_view(), ": ", name_view()).c_str(),
+        type_string().c_str());
+    auto wrappedDone = [range, &n] {
+      n.Notify();
+      ::nvtxRangeEnd(range);
+    };
+    ComputeAsync(context, wrappedDone);
+  } else {
+    ComputeAsync(context, [&n]() { n.Notify(); });
+  }
+#else
   ComputeAsync(context, [&n]() { n.Notify(); });
+#endif
+
   n.WaitForNotification();
 }
 
@@ -1716,7 +1732,6 @@ template <>
 const Eigen::GpuDevice& OpKernelContext::eigen_device() const {
   return eigen_gpu_device();
 }
-
 
 void OpKernelConstruction::CtxFailure(const Status& s) {
   VLOG(1) << s;

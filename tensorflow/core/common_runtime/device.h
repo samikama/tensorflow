@@ -85,13 +85,13 @@ class Device : public DeviceBase {
   // Subclasses may override this function if they wish to perform
   // some initialization before each compute.
   virtual void Compute(OpKernel* op_kernel, OpKernelContext* context) {
-    op_kernel->Compute(context);
+    op_kernel->SysCompute(context);
   }
 
   // Asynchronous kernel's compute.
   virtual void ComputeAsync(AsyncOpKernel* op_kernel, OpKernelContext* context,
                             AsyncOpKernel::DoneCallback done) {
-    op_kernel->ComputeAsync(context, std::move(done));
+    op_kernel->SysComputeAsync(context, std::move(done));
   }
 
   // Blocks until all operations queued on the device at the time of
