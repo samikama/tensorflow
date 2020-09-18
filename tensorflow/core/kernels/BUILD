@@ -3008,6 +3008,7 @@ cc_library(
         ":adjust_hue_op",
         ":adjust_saturation_op",
         ":attention_ops",
+        ":batched_non_max_suppression_op",
         ":colorspace_op",
         ":crop_and_resize_op",
         ":decode_bmp_op",
@@ -3024,6 +3025,7 @@ cc_library(
         ":resize_bicubic_op",
         ":resize_bilinear_op",
         ":resize_nearest_neighbor_op",
+        ":roi_align_op",
         ":sample_distorted_bounding_box_op",
         ":scale_and_translate_op",
     ],
@@ -3130,6 +3132,14 @@ tf_kernel_library(
 )
 
 tf_kernel_library(
+    name = "batched_non_max_suppression_op",
+    hdrs = ["batched_non_max_suppression_op.h"],
+    gpu_srcs = ["batched_non_max_suppression_op.cu.cc","batched_non_max_suppression_op.h"],
+    deps = IMAGE_DEPS + ["//tensorflow/core/kernels:gpu_prim_hdrs"] + ["//tensorflow/core/kernels:transpose_functor"] +
+        ["//tensorflow/core/kernels:conv_2d_gpu"],
+)
+
+tf_kernel_library(
     name = "non_max_suppression_op",
     prefix = "non_max_suppression_op",
     deps = IMAGE_DEPS + [":gpu_prim_hdrs"],
@@ -3168,6 +3178,12 @@ tf_kernel_library(
 tf_kernel_library(
     name = "resize_nearest_neighbor_op",
     prefix = "resize_nearest_neighbor_op",
+    deps = IMAGE_DEPS,
+)
+
+tf_kernel_library(
+    name = "roi_align_op",
+    prefix = "roi_align_op",
     deps = IMAGE_DEPS,
 )
 
@@ -3329,6 +3345,24 @@ tf_cc_test(
     srcs = ["non_max_suppression_op_benchmark_test.cc"],
     deps = [
         ":image",
+        ":ops_testutil",
+        ":ops_util",
+        "//tensorflow/core:core_cpu",
+        "//tensorflow/core:framework",
+        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+        "//tensorflow/core:testlib",
+    ],
+)
+
+tf_cuda_cc_test(
+    name = "batched_non_max_suppression_op_gpu_test",
+    srcs = ["batched_non_max_suppression_op_gpu_test.cc"],
+    tags = tf_cuda_tests_tags() + ["no_cuda_on_cpu_tap"],
+    deps = [
+        ":image",
+        "@com_google_absl//absl/strings",
         ":ops_testutil",
         ":ops_util",
         "//tensorflow/core:core_cpu",

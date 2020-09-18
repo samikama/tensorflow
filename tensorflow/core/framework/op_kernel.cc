@@ -204,7 +204,23 @@ string OpKernel::TraceString(OpKernelContext* ctx, bool verbose) {
 
 void AsyncOpKernel::Compute(OpKernelContext* context) {
   Notification n;
+#ifdef GOOGLE_CUDA
+  if (is_nvtx_on()) {
+    auto range = StartNvtxRange(
+        strings::StrCat("(A!) ", type_string_view(), ": ", name_view()).c_str(),
+        type_string().c_str());
+    auto wrappedDone = [range, &n] {
+      n.Notify();
+      EndNvtxRange(range);
+    };
+    ComputeAsync(context, wrappedDone);
+  } else {
+    ComputeAsync(context, [&n]() { n.Notify(); });
+  }
+#else
   ComputeAsync(context, [&n]() { n.Notify(); });
+#endif
+
   n.WaitForNotification();
 }
 
