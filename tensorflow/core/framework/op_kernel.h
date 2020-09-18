@@ -284,15 +284,20 @@ class AsyncOpKernel : public OpKernel {
   void SysComputeAsync(OpKernelContext* context, DoneCallback done) {
 #ifdef GOOGLE_CUDA
     if (is_nvtx_on()) {
+      auto sync_name=strings::StrCat(type_string_view(), ": ", name_view());
+      auto sync_range = StartNvtxRange(
+          strings::StrCat("(S) ",sync_name).c_str(),
+          type_string().c_str());
+
       auto range = StartNvtxRange(
-          strings::StrCat("(A) ", type_string_view(), ": ", name_view())
-              .c_str(),
+          strings::StrCat("(A) ",sync_name).c_str(),
           type_string().c_str());
       auto wrappedDone = [range, done] {
         done();
         ::nvtxRangeEnd(range);
       };
       ComputeAsync(context, wrappedDone);
+      ::nvtxRangeEnd(sync_range);
     } else {
       ComputeAsync(context, done);
     }
