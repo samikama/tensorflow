@@ -409,7 +409,7 @@ void XlaDevice::Compute(OpKernel* op_kernel, OpKernelContext* context) {
   VLOG(2) << "XlaDevice::Compute " << op_kernel->name() << ":"
           << op_kernel->type_string();
   ShowXlaDeviceDeprecationWarning(jit_device_name_.type_string());
-  op_kernel->Compute(context);
+  op_kernel->SysCompute(parsed_name().type,context);
 }
 
 void XlaDevice::ComputeAsync(AsyncOpKernel* op_kernel, OpKernelContext* context,
@@ -417,7 +417,7 @@ void XlaDevice::ComputeAsync(AsyncOpKernel* op_kernel, OpKernelContext* context,
   ShowXlaDeviceDeprecationWarning(jit_device_name_.type_string());
   VLOG(2) << "XlaDevice::ComputeAsync " << op_kernel->name() << ":"
           << op_kernel->type_string();
-  op_kernel->ComputeAsync(context, done);
+  op_kernel->SysComputeAsync(parsed_name().type,context, done);
 }
 
 Status XlaDevice::Sync() {

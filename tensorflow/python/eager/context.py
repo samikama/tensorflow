@@ -440,7 +440,8 @@ class Context(object):
     self._log_device_placement = None
     self._enable_mlir_graph_optimization = None
     self._optimizer_experimental_options = {}
-
+    self._gpu_use_pinned_memory = None
+  
     _python_eager_context_create_counter.get_cell().increase_by(1)
   # pylint: enable=redefined-outer-name
 
@@ -1079,6 +1080,7 @@ class Context(object):
     return config_pb2.GPUOptions(
         allow_growth=allow_growth,
         visible_device_list=",".join(visible_device_list),
+        force_gpu_compatible=self._gpu_use_pinned_memory,
         experimental=config_pb2.GPUOptions.Experimental(
             virtual_devices=virtual_devices))
 
@@ -1594,6 +1596,21 @@ class Context(object):
           "Intra op parallelism cannot be modified after initialization.")
 
     self._intra_op_parallelism_threads = num_threads
+
+  @property
+  def force_gpu_compatible(self):
+    return self.config.gpu_options.force_gpu_compatible
+
+  @force_gpu_compatible.setter
+  def force_gpu_compatible(self, compatible):
+    if self._gpu_use_pinned_memory == compatible:
+      return
+
+    if self._context_handle is not None:
+      raise RuntimeError(
+          "force_gpu_compatible can not be modified after initialization")
+
+    self._gpu_use_pinned_memory = compatible
 
   @property
   def inter_op_parallelism_threads(self):

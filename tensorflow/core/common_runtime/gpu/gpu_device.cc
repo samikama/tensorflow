@@ -565,7 +565,7 @@ void BaseGPUDevice::Compute(OpKernel* op_kernel, OpKernelContext* context) {
   ScopedActivateExecutorContext scoped_activation{stream->parent()};
   ScopedMemoryDebugAnnotation op_annotation(op_kernel->name_view().data(),
                                             context->step_id());
-  op_kernel->Compute(context);
+  op_kernel->SysCompute(parsed_name().type,context);
   if (context->status().ok()) {
     if (sync_every_op_) {
       // Note: GPUUtil::Sync() only syncs the default stream.
@@ -623,7 +623,7 @@ void BaseGPUDevice::ComputeAsync(AsyncOpKernel* op_kernel,
           << stream_id << "]";
 
   ScopedActivateExecutorContext scoped_activation{stream->parent()};
-  op_kernel->ComputeAsync(context, std::move(done));
+  op_kernel->SysComputeAsync(parsed_name().type,context, std::move(done));
 }
 
 Status BaseGPUDevice::MaybeCopyTensorToGPU(

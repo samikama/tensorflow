@@ -51,9 +51,16 @@ limitations under the License.
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/profile_utils/cpu_utils.h"
+#include "tensorflow/core/platform/strcat.h"
 #include "tensorflow/core/platform/thread_annotations.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/protobuf/config.pb.h"
+#include "tensorflow/core/util/env_var.h"
+#include "tensorflow/core/framework/nvtx_helper.h"
+#ifdef GOOGLE_CUDA
+#include "third_party/gpus/cuda/include/nvtx3/nvToolsExt.h"
+
+#endif
 
 namespace Eigen {
 struct ThreadPoolDevice;
@@ -61,7 +68,48 @@ struct GpuDevice;
 }  // end namespace Eigen
 
 namespace tensorflow {
+// inline bool is_nvtx_on() {
+//   static bool enabled = []() {
+//     bool b;
+//     TF_CHECK_OK(ReadBoolFromEnvVar("ENABLE_NVTX_MARKERS", true, &b));
+//     return b;
+//   }();
+//   return enabled;
+// }
+// // DJBHash
+// inline unsigned djb_hash(const char* c) {
+//   unsigned hash = 5381;
+//   unsigned s;
+//   while (s = *c++) {
+//     hash = ((hash << 5) + hash) + s;
+//   }
+//   return hash;
+// }
 
+// inline uint32_t GetColorForType(const char* c) {
+//   // colors from colorbrewer2.org
+//   // https://colorbrewer2.org/?type=qualitative&scheme=Accent&n=8 and
+//   // https://colorbrewer2.org/?type=qualitative&scheme=Paired&n=8
+//   static const uint32_t colors[] = {0x7fc97f, 0xbeaed4, 0xfdc086, 0xffff99,
+//                                     0x386cb0, 0xf0027f, 0xbf5b17, 0x666666,
+//                                     0xa6cee3, 0x1f78b4, 0xb2df8a, 0x33a02c,
+//                                     0xfb9a99, 0xe31a1c, 0xfdbf6f, 0xff7f00};
+//   return colors[djb_hash(c) & 15];
+// };
+// #ifdef GOOGLE_CUDA
+// inline nvtxRangeId_t StartNvtxRange(const char* record_msg,
+//                                     const char* op_type) {
+//   nvtxEventAttributes_t attrs = {};
+//   attrs.version = NVTX_VERSION;
+//   attrs.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+//   attrs.colorType = NVTX_COLOR_ARGB;
+//   attrs.color = GetColorForType(op_type);
+//   attrs.messageType = NVTX_MESSAGE_TYPE_ASCII;
+//   attrs.message.ascii = record_msg;
+//   attrs.category = 0;
+//   return ::nvtxRangeStartEx(&attrs);
+// }
+// #endif
 namespace checkpoint {
 class TensorSliceReaderCacheWrapper;
 }  // namespace checkpoint
@@ -130,7 +178,21 @@ class OpKernel {
   //
   // "context" is guaranteed to be alive until Compute() returns.
   virtual void Compute(OpKernelContext* context) = 0;
-
+  void SysCompute(const std::string& device_type,OpKernelContext* context) {
+#ifdef GOOGLE_CUDA
+    if (is_nvtx_on()) {
+      auto range = StartNvtxRange(
+          strings::StrCat(device_type.c_str(),"|",type_string_view(), ": ", name_view()).c_str(),
+          type_string().c_str());
+      Compute(context);
+      EndNvtxRange(range);
+    } else {
+      Compute(context);
+    }
+#else
+    Compute(context);
+#endif
+  }
   // Returns nullptr iff this op kernel is synchronous.
   virtual AsyncOpKernel* AsAsync() { return nullptr; }
 
@@ -220,7 +282,30 @@ class AsyncOpKernel : public OpKernel {
   // to `done`.
   typedef std::function<void()> DoneCallback;
   virtual void ComputeAsync(OpKernelContext* context, DoneCallback done) = 0;
+  void SysComputeAsync(const std::string& device_type,OpKernelContext* context, DoneCallback done) {
+#ifdef GOOGLE_CUDA
+    if (is_nvtx_on()) {
+      auto sync_name=strings::StrCat(device_type.c_str(),"|",type_string_view(), ": ", name_view());
+      auto sync_range = StartNvtxRange(
+          strings::StrCat("(S) ",sync_name).c_str(),
+          type_string().c_str());
 
+      auto range = StartNvtxRange(
+          strings::StrCat("(A) ",sync_name).c_str(),
+          type_string().c_str());
+      auto wrappedDone = [range, done] {
+        done();
+        EndNvtxRange(range);
+      };
+      ComputeAsync(context, wrappedDone);
+      EndNvtxRange(sync_range);
+    } else {
+      ComputeAsync(context, done);
+    }
+#else
+    ComputeAsync(context, done);
+#endif
+  }
   AsyncOpKernel* AsAsync() override { return this; }
 
   void Compute(OpKernelContext* context) override;
