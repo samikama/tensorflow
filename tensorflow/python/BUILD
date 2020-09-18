@@ -48,6 +48,12 @@ load(
     "if_ngraph",
 )
 
+load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts")
+load(
+    "//tensorflow/core/platform/default:cuda_build_defs.bzl",
+    "if_cuda_is_configured",
+)
+
 # TODO(mdan): Break into per-directory files.
 
 visibility = [
@@ -746,6 +752,21 @@ tf_python_pybind_extension(
 )
 
 tf_python_pybind_extension(
+    name = "_pywrap_nvtx",
+    srcs = ["util/nvtx_wrapper.cc"],
+    module_name = "_pywrap_nvtx",
+    deps = [
+        "//tensorflow/core:framework_headers_lib",
+        "//tensorflow/core:lib_headers_for_pybind",
+        "//third_party/eigen3",
+        "//third_party/python_runtime:headers",
+        "@com_google_absl//absl/strings",
+        "@pybind11",
+    ] +  if_cuda_is_configured(["@local_config_cuda//cuda:cuda_headers"]),
+    copts=cuda_default_copts(),
+)
+
+tf_python_pybind_extension(
     name = "_pywrap_utils",
     srcs = ["util/util_wrapper.cc"],
     hdrs = ["util/util.h"],
@@ -1391,6 +1412,7 @@ py_library(
         ":_pywrap_transform_graph",
         ":_pywrap_util_port",
         ":_pywrap_utils",
+        ":_pywrap_nvtx",
         ":composite_tensor",
         ":convert_to_constants",
         ":cpp_shape_inference_proto_py",
@@ -1411,6 +1433,7 @@ py_library(
         ":tensor_util",
         ":type_spec",
         ":util",
+
         "//third_party/py/numpy",
         "@six_archive//:six",
         "//tensorflow/python/eager:context",

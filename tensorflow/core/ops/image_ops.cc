@@ -16,6 +16,7 @@ limitations under the License.
 #include "tensorflow/core/framework/common_shape_fns.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/shape_inference.h"
+#include "tensorflow/core/util/tensor_format.h"
 
 namespace tensorflow {
 
@@ -937,6 +938,81 @@ REGISTER_OP("CropAndResizeGradBoxes")
     });
 
 // --------------------------------------------------------------------------
+REGISTER_OP("ROIAlign")
+    .Input("input: T")
+    .Input("rois: T")
+    .Input("sampling_ratio: int32")
+    .Input("spatial_scale: float")
+    .Input("min_level: int32")
+    .Input("max_level: int32")
+    .Input("canonical_scale: float")
+    .Input("canonical_level: int32")
+    .Output("output: float")
+    .Attr("T: {float, half}")
+    .Attr("pooled_height: int = 7")
+    .Attr("pooled_width: int = 7")
+    .Attr(GetConvnetDataFormatAttrString())
+    .SetShapeFn([](InferenceContext* c) -> Status {
+      // 5D feature inputs [N,L,C,H,W]
+      // or [N,L,H,W,C]
+      ShapeHandle features;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 5, &features));
+      // 3D roi boxes [N,R,4] [ y1, x1, y2, x2]
+      ShapeHandle boxes;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 3, &boxes));
+
+      auto input_shape = c->input(0);
+      auto roi_shape = c->input(1);
+      int pooled_h;
+      string layout;
+      TF_RETURN_IF_ERROR(c->GetAttr("data_format", &layout));
+      TF_RETURN_IF_ERROR(c->GetAttr("pooled_height", &pooled_h));
+      int pooled_w;
+      TF_RETURN_IF_ERROR(c->GetAttr("pooled_width", &pooled_w));
+      auto Rdim = c->Dim(roi_shape, 1);  // Num boxes i.e K
+      TensorFormat format;
+      if (!FormatFromString(layout, &format)) {
+        return errors::InvalidArgument("Invalid data format");
+      }
+      if (format == FORMAT_NCHW) {
+        auto Cdim = c->Dim(input_shape, 2);  // Num channels = C
+        auto output_shape =
+            c->MakeShape({c->Dim(input_shape, 0), Rdim, Cdim, pooled_h,
+                          pooled_w});  // N, K, C, H, W
+        c->set_output(0, output_shape);
+      } else if (format == FORMAT_NHWC) {
+        auto Cdim = c->Dim(input_shape, 4);  // Num channels = C
+        auto output_shape =
+            c->MakeShape({c->Dim(input_shape, 0), Rdim, pooled_h, pooled_w,
+                          Cdim});  // N, K, H, W, C
+        c->set_output(0, output_shape);
+      } else {
+        return errors::InvalidArgument("Invalid data format");
+      }
+      return Status::OK();
+    });
+
+REGISTER_OP("ROIAlignGrad")
+    .Input("grads: T")
+    .Input("input: T")
+    .Input("rois: T")
+    .Input("sampling_ratio: int32")
+    .Input("spatial_scale: float")
+    .Input("min_level: int32")
+    .Input("max_level: int32")
+    .Input("canonical_scale: float")
+    .Input("canonical_level: int32")
+    .Output("output: float")
+    .Attr("T: {float, half}")
+    .Attr("pooled_height: int = 7")
+    .Attr("pooled_width: int = 7")
+    .Attr(GetConvnetDataFormatAttrString())
+    .SetShapeFn([](InferenceContext* c) -> Status {
+      c->set_output(0, c->input(1));
+      return Status::OK();
+    });
+
+// -----------------------------------------------------------------------------------------
 
 REGISTER_OP("NonMaxSuppression")
     .Input("boxes: float")
@@ -1178,6 +1254,59 @@ REGISTER_OP("ImageProjectiveTransformV3")
       TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 4, &input));
       return SetOutputToSizedImage(c, c->Dim(input, 0), 2 /* size_input_idx */,
                                    c->Dim(input, 3));
+    });
+
+REGISTER_OP("BatchedNonMaxSuppression")
+    .Input("boxes: T")
+    .Input("scores: T")
+    .Input("box_counts: int32")
+    .Input("max_output_size: int32")
+    .Input("iou_threshold: T_threshold")
+    .Input("score_threshold: T_threshold")
+    .Output("selected_indices: int32")
+    .Output("selected_counts: int32")
+    .Attr("T: {float}")
+    .Attr("T_threshold: {float}")
+    .Attr("pad_to_max_output_size: bool = false")
+    .Attr("algorithm: int = -1")
+    .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle boxes;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(0), 3, &boxes));
+      ShapeHandle scores;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 2, &scores));
+      ShapeHandle box_sizes;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 1, &box_sizes));
+      ShapeHandle max_output_size;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 0, &max_output_size));
+      ShapeHandle overlap_threshold;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(4), 0, &overlap_threshold));
+      ShapeHandle score_threshold;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(5), 0, &score_threshold));
+      DimensionHandle unused;
+      // The boxes[1] and scores[1] are both num_boxes.
+      TF_RETURN_IF_ERROR(
+          c->Merge(c->Dim(boxes, 1), c->Dim(scores, 1), &unused));
+      // The boxes[1] is 4.
+      TF_RETURN_IF_ERROR(c->WithValue(c->Dim(boxes, 2), 4, &unused));
+      if (c->ValueKnown(c->Dim(boxes, 0))) {
+        if (!(c->ValueKnown(c->Dim(scores, 0)) &&
+              c->ValueKnown(c->Dim(box_sizes, 0))) ||
+            (c->Value(c->Dim(box_sizes, 0)) != c->Value(c->Dim(boxes, 0)))) {
+          return errors::InvalidArgument(
+              "Batch size should be same for boxes,scores and box_sizes");
+        }
+      }
+      bool pad_to_max;
+      TF_RETURN_IF_ERROR(c->GetAttr("pad_to_max_output_size", &pad_to_max));
+      if (pad_to_max) {
+        // If padded, overwrite the shape of the output to be static.
+        DimensionHandle output_dim;
+        TF_RETURN_IF_ERROR(c->MakeDimForScalarInput(3, &output_dim));
+        c->set_output(0, c->MakeShape({c->Dim(boxes, 0), output_dim}));
+      }
+      c->set_output(1, c->MakeShape({c->Dim(boxes, 0)}));
+
+      return Status::OK();
     });
 
 }  // namespace tensorflow
