@@ -504,30 +504,34 @@ class ROIAlignOpGrad : public tensorflow::OpKernel {
                                 DataType::DT_INT32,
                                 TensorShape({batch, n_rois, 1}), &levels));
     CudaLaunchConfig config1D = GetCudaLaunchConfig(batch * n_rois, d);
-    VLOG(1) << "Before boxes cudaconfig numelts= "
-            << config1D.virtual_thread_count << " " << name();
+    if (VLOG_IS_ON(1)) {
+      VLOG(1) << "Before boxes cudaconfig numelts= "
+              << config1D.virtual_thread_count << " " << name();
+    }
     Boxes2ScaledBoxesAndLevels<float>
         <<<config1D.block_count, config1D.thread_per_block, 0, d.stream()>>>(
             config1D, RoIs.flat<float>().data(), min_level, max_level,
             canonical_scale, canonical_level, (levels).flat<int32>().data(),
             (scaled_boxes).flat<float>().data(), true);
-
-    VLOG(2) << "after boxes scaled_shape" << scaled_boxes.shape()
-            << " levels.shape" << levels.shape();
-
+    if (VLOG_IS_ON(2)) {
+      VLOG(2) << "after boxes scaled_shape" << scaled_boxes.shape()
+              << " levels.shape" << levels.shape();
+    }
     Cuda2DLaunchConfig config = GetCuda2DLaunchConfig(
         n_rois * channels * pooled_height_ * pooled_width_, batch, d);
-    VLOG(2) << "before RoiAlign Backward " << name()
-            << " grads=" << grads.shape() << " features=" << features.shape()
-            << " RoIs" << RoIs.shape() << " block ( " << config.block_count.x
-            << "," << config.block_count.y << "," << config.block_count.z
-            << " ) "
-            << " thread ( " << config.thread_per_block.x << ","
-            << config.thread_per_block.y << "," << config.thread_per_block.z
-            << " )"
-            << " virt ( " << config.virtual_thread_count.x << ","
-            << config.virtual_thread_count.y << ","
-            << config.virtual_thread_count.z << ")";
+    if (VLOG_IS_ON(2)) {
+      VLOG(2) << "before RoiAlign Backward " << name()
+              << " grads=" << grads.shape() << " features=" << features.shape()
+              << " RoIs" << RoIs.shape() << " block ( " << config.block_count.x
+              << "," << config.block_count.y << "," << config.block_count.z
+              << " ) "
+              << " thread ( " << config.thread_per_block.x << ","
+              << config.thread_per_block.y << "," << config.thread_per_block.z
+              << " )"
+              << " virt ( " << config.virtual_thread_count.x << ","
+              << config.virtual_thread_count.y << ","
+              << config.virtual_thread_count.z << ")";
+    }
     CudaLaunchConfig zconfig = GetCudaLaunchConfig(output->NumElements(), d);
     SetZero<<<zconfig.block_count, zconfig.thread_per_block, 0, d.stream()>>>(
         zconfig.virtual_thread_count, (*output).flat<float>().data());
@@ -538,12 +542,13 @@ class ROIAlignOpGrad : public tensorflow::OpKernel {
             channels, height, width, n_rois, pooled_height_, pooled_width_,
             sampling_ratio, roi_cols, (scaled_boxes).flat<float>().data(),
             (levels).flat<int32>().data(), (*output).flat<float>().data());
-
-    VLOG(2) << "after RoiAlign Backward, X.shape() "
-            << features.shape().DebugString()
-            << " scaled_boxes=" << scaled_boxes.shape()
-            << " pooled_width=" << pooled_width_
-            << "output shape=" << output->shape();
+    if (VLOG_IS_ON(2)) {
+      VLOG(2) << "after RoiAlign Backward, X.shape() "
+              << features.shape().DebugString()
+              << " scaled_boxes=" << scaled_boxes.shape()
+              << " pooled_width=" << pooled_width_
+              << "output shape=" << output->shape();
+    }
   }
 
  private:
