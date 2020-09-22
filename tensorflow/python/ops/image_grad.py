@@ -404,7 +404,7 @@ def _ROIAlignGrad(op, grad):
   allowed_types = [dtypes.float32]
   if op.inputs[0].dtype in allowed_types:
     # pylint: disable=protected-access
-    grad0 = gen_roi_align_op.roi_align_grad(
+    grad0 = gen_image_ops.roi_align_grad(
         grad,
         original_input,
         rois,
@@ -421,4 +421,4 @@ def _ROIAlignGrad(op, grad):
   else:
     grad0 = None
   # gradient wrt rois is 0
-  return [grad0, None, None, None, None, None, None]
+  return [grad0, None, None, None, None, None, None, None]
