@@ -448,7 +448,7 @@ __global__ void RoIAlignForwardHWC(
       // CUDA_1D_KERNEL_LOOP(index, nthreads.virtual_thread_count) {
       // (n, ph, pw, c) is an element in the pooled output
       //  returns (b,n,h,w,c)
-      int c = index % pooled_width;
+      int c = index % channels;
       int pw = (index / channels) % pooled_width;
       int ph = (index / channels / pooled_width) % pooled_height;
       int n = index / channels / pooled_width / pooled_height;
@@ -707,8 +707,11 @@ class ROIAlignOp : public tensorflow::OpKernel {
     Cuda2DLaunchConfig config = GetCuda2DLaunchConfig(
         n_rois * channels * pooled_height_ * pooled_width_, batch, d);
     if (VLOG_IS_ON(2)) {
-      VLOG(2) << "before RoiAlign forward " << name() << " X " << X.shape()
-              << " boxes= " << scaled_boxes.shape()
+      VLOG(2) << "before RoiAlign forward"
+              << ((layout_ == FORMAT_NCHW) ? " " : "_NHWC ") << name()
+              << " input " << X.shape() << " boxes= " << scaled_boxes.shape()
+              << " dtype= "
+              << ((X.dtype() == DataType::DT_FLOAT) ? "FP32" : "FP16")
               << " levels=" << levels.shape() << " output shape=" << Y->shape()
               << " block ( " << config.block_count.x << ","
               << config.block_count.y << "," << config.block_count.z << " ) "
@@ -864,8 +867,11 @@ class ROIAlignOpGrad : public tensorflow::OpKernel {
     Cuda2DLaunchConfig config = GetCuda2DLaunchConfig(
         n_rois * channels * pooled_height_ * pooled_width_, batch, d);
     if (VLOG_IS_ON(2)) {
-      VLOG(2) << "before RoiAlign Backward " << name()
+      VLOG(2) << "before RoiAlign Backward "
+              << ((layout_ == FORMAT_NCHW) ? " " : "_NHWC ") << name()
               << " grads=" << grads.shape() << " features=" << features.shape()
+              << " dtype= "
+              << ((features.dtype() == DataType::DT_FLOAT) ? "FP32" : "FP16")
               << " RoIs" << RoIs.shape() << " block ( " << config.block_count.x
               << "," << config.block_count.y << "," << config.block_count.z
               << " ) "
@@ -925,7 +931,7 @@ class ROIAlignOpGrad : public tensorflow::OpKernel {
               << features.shape().DebugString()
               << " scaled_boxes=" << scaled_boxes.shape()
               << " pooled_width=" << pooled_width_
-              << "output shape=" << output->shape();
+              << " output shape=" << output->shape();
     }
   }
 
