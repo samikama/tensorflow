@@ -57,6 +57,11 @@ uint32 GetFmaMaxThroughputPerSMPerCycle(const DeviceCapabilities& device_cap) {
       n_fp32_cores = 64;
       n_tc_cores = 8;
       break;
+    case 8:
+      //A100
+      n_fp32_cores = 64;
+      n_tc_cores = 4*4; //4 cores times 256 ops per cycle (i.e. 4x volta)
+      break;
     default:
       LOG(ERROR) << "Invalid GPU compute capability.";
       break;
