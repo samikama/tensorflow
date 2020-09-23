@@ -416,6 +416,7 @@ def _ROIAlignGrad(op, grad):
         canonical_level,
         pooled_height=op.get_attr("pooled_height"),
         pooled_width=op.get_attr("pooled_width"),
+        data_format=op.get_attr("data_format")
     )
     # pylint: enable=protected-access
   else:
