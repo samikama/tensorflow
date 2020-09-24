@@ -77,8 +77,8 @@ constexpr int kNmsBoxesPerThreadModuloMask = kNmsBoxesPerThread - 1;
 // constexpr int kNmsBoxesPerThreadShiftBits =
 //     NumBits(kNmsBoxesPerThreadModuloMask);
 
-constexpr int kNmsBlockDim = 16;
-constexpr int kNmsBlockDimMax = 128;
+constexpr int kNmsBlockDim =32;
+constexpr int kNmsBlockDimMax = 256;
 // constexpr int kNmsChunkSize = 2000;
 constexpr int kNmsReductionChunkSize = 256;
 constexpr int kNmsReductionChunkMask = kNmsReductionChunkSize - 1;

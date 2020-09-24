@@ -32,8 +32,13 @@ limitations under the License.
 #include "tensorflow/core/util/gpu_kernel_helper.h"
 #include "tensorflow/core/util/gpu_launch_config.h"
 
+
 namespace tensorflow {
 typedef Eigen::GpuDevice GPUDevice;
+
+constexpr int threadsPerBlock = 64;
+constexpr int block_size = sizeof(unsigned long long) * 8;
+constexpr int max_shmem_size = 49152;
 
 namespace {
 
@@ -278,6 +283,120 @@ __global__ void InitializeDataKernel(const Gpu2DLaunchConfig config,
         if (img_idx == 0) d_image_offsets[num_images] = image_size * num_images;
       }
     }
+  }
+}
+
+__device__ inline float devIoU(float const * const a, float const * const b) {
+  float left = std::max(a[0], b[0]), right = std::min(a[2], b[2]);
+  float top = std::max(a[1], b[1]), bottom = std::min(a[3], b[3]);
+  float width = std::max(right - left, 0.f), height = std::max(bottom - top, 0.f);
+  float interS = width * height;
+  float Sa = (a[2] - a[0] + 1) * (a[3] - a[1] + 1);
+  float Sb = (b[2] - b[0] + 1) * (b[3] - b[1] + 1);
+  return interS / (Sa + Sb - interS);
+}
+
+__global__ void nms_reduce_batched(const int *n_boxes_arr, unsigned long long *dev_mask_cat, unsigned char *initial_pos_mask, 
+                                   unsigned char *res_mask_byte_arr, int mask_dev_stride, int mask_res_stride) {
+  int fmap_id = blockIdx.x;
+  int tid = threadIdx.x;
+  const int n_boxes = n_boxes_arr[fmap_id];
+  int offset = 0;
+  for (int i = 0; i < fmap_id; i++) offset += n_boxes_arr[i];
+  const unsigned long long *dev_mask = dev_mask_cat + mask_dev_stride * fmap_id;
+  initial_pos_mask += offset;
+  unsigned char *res_mask_byte = res_mask_byte_arr + offset;
+ 
+  const int col_blocks = (n_boxes+threadsPerBlock-1)/threadsPerBlock;
+  //compute largest block we can fit in shared memory
+  const unsigned int block_rows_max = max_shmem_size / sizeof(unsigned long long) / col_blocks - 1;
+  //use intrinsics functions to compute largest block that is power of 2
+  //power of 2 helps the main loop to be more efficient
+  const unsigned int block_rows = 1 << (8 * sizeof(unsigned int) - __ffs(__brev(block_rows_max)));
+  extern __shared__ unsigned long long mask_buf_sh[];
+  unsigned long long *res_mask_sh = mask_buf_sh;
+  unsigned long long *mask_block = mask_buf_sh + col_blocks; 
+  for (int i = tid; i < col_blocks; i += blockDim.x) {
+	  res_mask_sh[i] = 0;
+          for (int j=0;j<8*sizeof(unsigned long long);j++){
+	      if ( (i*64 +j) < n_boxes &&  (initial_pos_mask[i*64+j] == 0)) res_mask_sh[i] |= 1ULL<<j; 
+	  }
+  }
+
+  __syncthreads();
+  unsigned int *mask_block32 = (unsigned int*) mask_block ;
+  unsigned int *res_mask_sh32 = (unsigned int*) res_mask_sh ;
+  for (unsigned int i = 0; i < n_boxes; i += block_rows){
+    int num_rows = std::min(n_boxes-i, block_rows);
+    int block_max_elements = num_rows * col_blocks;
+    for (int j = tid; j < block_max_elements; j += block_size) mask_block[j] = dev_mask[i * col_blocks + j];
+    __syncthreads();
+    int nblock = i / block_size;
+    int num_rows_inner_loop;
+    for (int k_start = 0; k_start < block_rows; k_start += block_size) {
+      num_rows_inner_loop = std::min(num_rows, k_start + block_size) - k_start;
+      for (int k = 0; k < num_rows_inner_loop; k++){
+        if (!(res_mask_sh[nblock] & 1ULL << k)){
+          for (int t = tid; t < col_blocks; t += block_size) 
+            res_mask_sh[t] |= mask_block[(k + k_start) * col_blocks + t];
+        }
+        __syncthreads();
+      }
+      nblock++;
+    }
+  }
+  for (int i = tid; i < n_boxes; i += block_size){
+    int nblock = i / block_size;
+    int in_block = i % block_size;
+    res_mask_byte[i] = 1 - (unsigned char)((res_mask_sh[nblock] & 1ULL << in_block) >> in_block);
+  }
+}
+
+__global__ void nms_kernel_batched(const int *n_boxes_arr, const float nms_overlap_thresh, const float *dev_boxes_cat, 
+                                   unsigned long long *dev_mask_cat, int mask_stride) {
+  const int tPBlock=threadsPerBlock;
+  const int fmap_id = blockIdx.z; 
+  const int row_start = blockIdx.y;
+  const int col_start = blockIdx.x;
+  const int n_boxes = n_boxes_arr[fmap_id];
+  int offset = 0;
+  for (int i = 0; i < fmap_id; i++) offset += n_boxes_arr[i];
+  const float *dev_boxes = dev_boxes_cat + offset * 4;
+  unsigned long long *dev_mask = dev_mask_cat + mask_stride * fmap_id;
+  const int row_size =
+        std::min(n_boxes - row_start * tPBlock, tPBlock);
+  const int col_size =
+        std::min(n_boxes - col_start * tPBlock, tPBlock);
+  if (row_size < 0 || col_size < 0) return;
+  __shared__ float block_boxes[threadsPerBlock * 4];
+  if (threadIdx.x < col_size) {
+    block_boxes[threadIdx.x * 4 + 0] =
+        dev_boxes[(threadsPerBlock * col_start + threadIdx.x) * 4 + 0];
+    block_boxes[threadIdx.x * 4 + 1] =
+        dev_boxes[(threadsPerBlock * col_start + threadIdx.x) * 4 + 1];
+    block_boxes[threadIdx.x * 4 + 2] =
+        dev_boxes[(threadsPerBlock * col_start + threadIdx.x) * 4 + 2];
+    block_boxes[threadIdx.x * 4 + 3] =
+        dev_boxes[(threadsPerBlock * col_start + threadIdx.x) * 4 + 3];
+  }
+  __syncthreads();
+
+  if (threadIdx.x < row_size) {
+    const int cur_box_idx = threadsPerBlock * row_start + threadIdx.x;
+    const float *cur_box = dev_boxes + cur_box_idx * 4;
+    int i = 0;
+    unsigned long long t = 0;
+    int start = 0;
+    if (row_start == col_start) {
+      start = threadIdx.x + 1;
+    }
+    for (i = start; i < col_size; i++) {
+      if (devIoU(cur_box, block_boxes + i * 4) > nms_overlap_thresh) {
+        t |= 1ULL << i;
+      }
+    }
+    const int col_blocks = (n_boxes+threadsPerBlock-1)/threadsPerBlock;
+    dev_mask[cur_box_idx * col_blocks + col_start] = t;
   }
 }
 
