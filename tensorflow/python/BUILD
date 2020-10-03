@@ -48,7 +48,7 @@ load(
     "if_ngraph",
 )
 
-load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
+load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts")
 load(
     "//tensorflow/core/platform/default:cuda_build_defs.bzl",
     "if_cuda_is_configured",
@@ -761,6 +761,7 @@ tf_python_pybind_extension(
         "@com_google_absl//absl/strings",
         "@pybind11",
     ] +  if_cuda_is_configured(["@local_config_cuda//cuda:cuda_headers"]),
+    copts=cuda_default_copts(),
 )
 
 tf_python_pybind_extension(
