@@ -177,11 +177,11 @@ class OpKernel {
   //
   // "context" is guaranteed to be alive until Compute() returns.
   virtual void Compute(OpKernelContext* context) = 0;
-  void SysCompute(OpKernelContext* context) {
+  void SysCompute(const std::string& device_type,OpKernelContext* context) {
 #ifdef GOOGLE_CUDA
     if (is_nvtx_on()) {
       auto range = StartNvtxRange(
-          strings::StrCat(type_string_view(), ": ", name_view()).c_str(),
+          strings::StrCat(device_type.c_str(),"|",type_string_view(), ": ", name_view()).c_str(),
           type_string().c_str());
       Compute(context);
       ::nvtxRangeEnd(range);
@@ -281,10 +281,10 @@ class AsyncOpKernel : public OpKernel {
   // to `done`.
   typedef std::function<void()> DoneCallback;
   virtual void ComputeAsync(OpKernelContext* context, DoneCallback done) = 0;
-  void SysComputeAsync(OpKernelContext* context, DoneCallback done) {
+  void SysComputeAsync(const std::string& device_type,OpKernelContext* context, DoneCallback done) {
 #ifdef GOOGLE_CUDA
     if (is_nvtx_on()) {
-      auto sync_name=strings::StrCat(type_string_view(), ": ", name_view());
+      auto sync_name=strings::StrCat(device_type.c_str(),"|",type_string_view(), ": ", name_view());
       auto sync_range = StartNvtxRange(
           strings::StrCat("(S) ",sync_name).c_str(),
           type_string().c_str());
