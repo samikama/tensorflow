@@ -214,7 +214,7 @@ void AsyncOpKernel::Compute(OpKernelContext* context) {
         type_string().c_str());
     auto wrappedDone = [range, &n] {
       n.Notify();
-      ::nvtxRangeEnd(range);
+      EndNvtxRange(range);
     };
     ComputeAsync(context, wrappedDone);
   } else {
