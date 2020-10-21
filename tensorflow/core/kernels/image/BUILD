@@ -259,8 +259,11 @@ tf_kernel_library(
 
 tf_kernel_library(
     name = "batched_non_max_suppression_op",
-    prefix = "batched_non_max_suppresion_op",
-    deps = IMAGE_DEPS + ["//tensorflow/core/kernels:gpu_prim_hdrs"] + ["//tensorflow/core/kernels:transpose_functor"],
+    #prefix = "batched_non_max_suppression_op",
+    hdrs = ["batched_non_max_suppression_op.h"],
+    gpu_srcs = ["batched_non_max_suppression_op.cu.cc","batched_non_max_suppression_op.h"],
+    deps = IMAGE_DEPS + ["//tensorflow/core/kernels:gpu_prim_hdrs"] + ["//tensorflow/core/kernels:transpose_functor"] +
+        ["//tensorflow/core/kernels:conv_2d_gpu"],
 )
 
 tf_kernel_library(

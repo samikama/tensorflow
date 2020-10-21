@@ -1,5 +1,7 @@
+#if GOOGLE_CUDA
+#define EIGEN_USE_GPU
 #include <limits>
-#include "tensorflow/core/kernels/batched_non_max_suppression_op.h"
+#include "tensorflow/core/kernels/image/batched_non_max_suppression_op.h"
 
 #include "absl/strings/str_cat.h"
 #include "tensorflow/core/framework/numeric_types.h"
@@ -9,9 +11,7 @@
 #include "tensorflow/core/util/gpu_kernel_helper.h"
 #include "tensorflow/core/util/gpu_launch_config.h"
 #include "tensorflow/stream_executor/stream_executor.h"
-#include "third_party/cub/device/device_radix_sort.cuh"
-#include "third_party/cub/device/device_segmented_radix_sort.cuh"
-#include "third_party/cub/device/device_select.cuh"
+#include "tensorflow/core/kernels/gpu_prim.h"
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 // DoTranspose is broken we need to use conv2d swapdimensions1and2intensor3
 #include "tensorflow/core/kernels/conv_2d_gpu.h"
@@ -35,8 +35,6 @@
     }                                                                  \
   } while (0)
 
-#if GOOGLE_CUDA
-#define EIGEN_USE_GPU
 
 struct __align__(16) Box {
   float x1, y1, x2, y2;
@@ -629,7 +627,7 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
     // workspace size needed for the operation instead of doing the operation.
     // In this specific instance, cub_sort_storage_bytes will contain the
     // necessary workspace size for sorting after the call.
-    cuda_ret = cub::DeviceSegmentedRadixSort::SortPairsDescending(
+    cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
         nullptr, cub_temp_storage_bytes,
         static_cast<float*>(nullptr),  // scores
         static_cast<float*>(nullptr),  // sorted scores
@@ -645,7 +643,7 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
   }
   size_t flagged_buffer_size = 0;
   cuda_ret =
-      cub::DeviceSelect::Flagged(static_cast<void*>(nullptr),  // temp_storage
+      gpuprim::DeviceSelect::Flagged(static_cast<void*>(nullptr),  // temp_storage
                                  flagged_buffer_size,
                                  static_cast<int*>(nullptr),   // input
                                  static_cast<char*>(nullptr),  // selection flag
@@ -722,7 +720,7 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
   device.memcpyHostToDevice(device_begin_offsets, begin_end_offsets,
                             sizeof(int) * batch_size * 2);
   if (!pre_sorted_inputs) {
-    cuda_ret = cub::DeviceSegmentedRadixSort::SortPairsDescending(
+    cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
         d_cub_temp_buffer.flat<int8>().data(), cub_temp_storage_bytes,
         scores.flat<float>().data(),           // scores
         d_sorted_scores.flat<float>().data(),  // sorted scores
@@ -835,7 +833,7 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
   }
 
   int* device_selected_indices = d_selected_indices.flat<int>().data();
-  cuda_ret = cub::DeviceSelect::Flagged(
+  cuda_ret = gpuprim::DeviceSelect::Flagged(
       d_cub_temp_buffer.flat<int8>().data(),  // temp_storage
       cub_temp_storage_bytes,
       d_indices.flat<int>().data(),  // input
@@ -926,7 +924,7 @@ Status SortScores(OpKernelContext* context, int batch_size, int num_classes,
   cudaError_t cuda_ret = cudaSuccess;
   auto cuda_stream = GetGpuStream(context);
   auto device = context->eigen_gpu_device();
-  cuda_ret = cub::DeviceSegmentedRadixSort::SortPairsDescending(
+  cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
       nullptr, cub_temp_storage_bytes,
       static_cast<float*>(nullptr),          // scores
       static_cast<float*>(nullptr),          // sorted scores
@@ -988,7 +986,7 @@ Status SortScores(OpKernelContext* context, int batch_size, int num_classes,
       device.stream(), num_boxes, 0, indices->template flat<int>().data(),
       batch_size * num_classes));
 
-  TF_RETURN_IF_CUDA_ERROR(cub::DeviceSegmentedRadixSort::SortPairsDescending(
+  TF_RETURN_IF_CUDA_ERROR(gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
       temp_buffer->flat<int8>().data(), cub_temp_storage_bytes,
       input_scores->flat<float>().data(),    // scores
       sorted_scores->flat<float>().data(),   // sorted scores
