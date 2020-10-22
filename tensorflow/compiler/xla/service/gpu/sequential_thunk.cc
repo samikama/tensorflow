@@ -47,7 +47,7 @@ Status SequentialThunk::ExecuteOnStream(const ExecuteParams& params) {
       params.profiler->MakeScopedInstructionProfiler(hlo_instruction());
   for (const auto& thunk : thunks_) {
     ScopedAnnotation annotation([&] { return thunk->profile_annotation(); });
-    TF_RETURN_IF_ERROR(thunk->ExecuteOnStream(params));
+    TF_RETURN_IF_ERROR(thunk->SysExecuteOnStream(params));
   }
   return Status::OK();
 }
