@@ -198,7 +198,7 @@ Status GpuExecutable::ExecuteThunks(
         gpu_options && gpu_options->nccl_unique_id_callback()
             ? &gpu_options->nccl_unique_id_callback()
             : nullptr};
-    TF_RETURN_IF_ERROR(thunk->ExecuteOnStream(thunk_params));
+    TF_RETURN_IF_ERROR(thunk->SysExecuteOnStream(thunk_params));
     if (thunk_schedule_->Depended(thunk)) {
       auto finish_event = absl::make_unique<se::Event>(main_stream->parent());
       finish_event->Init();
