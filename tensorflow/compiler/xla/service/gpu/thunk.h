@@ -19,11 +19,13 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/xla/executable_run_options.h"
 #include "tensorflow/compiler/xla/service/gpu/buffer_allocations.h"
 #include "tensorflow/compiler/xla/service/gpu/gpu_executable_run_options.h"
 #include "tensorflow/compiler/xla/service/gpu/hlo_execution_profiler.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
+#include "tensorflow/core/framework/nvtx_helper.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/stream_executor_no_cuda.h"
 
@@ -116,6 +118,23 @@ class Thunk {
   //
   // Precondition: Initialize(stream->parent()) has been called.
   virtual Status ExecuteOnStream(const ExecuteParams& params) = 0;
+  Status SysExecuteOnStream(const ExecuteParams& params) {
+#ifdef GOOGLE_CUDA
+    if (tensorflow::is_nvtx_on()) {
+      auto kind_str = Kind2String(kind());
+      auto range = tensorflow::StartNvtxRange(
+          absl::StrCat("XLA", "|", kind_str, ": ", profile_annotation()).c_str(),
+          kind_str);
+      auto st = ExecuteOnStream(params);
+      tensorflow::EndNvtxRange(range);
+      return st;
+    } else {
+      return ExecuteOnStream(params);
+    }
+#else
+    return ExecuteOnStream(params);
+#endif
+  }
 
  protected:
   absl::optional<int64> profile_index() const { return profile_index_; }
@@ -134,6 +153,57 @@ class Thunk {
 
  private:
   Kind kind_;
+  const HloInstruction* hlo_instruction_;
+  const char* Kind2String(Kind kind) {
+    switch (kind) {
+      case Thunk::kCholesky:
+        return "kCholesky";
+      case Thunk::kCollectivePermute:
+        return "kCollectivePermute";
+      case Thunk::kConditional:
+        return "kConditional";
+      case Thunk::kConvolution:
+        return "kConvolution";
+      case Thunk::kCopy:
+        return "kCopy";
+      case Thunk::kCudnnBatchNormBackward:
+        return "kCudnnBatchNormBackward";
+      case Thunk::kCudnnBatchNormForwardInference:
+        return "kCudnnBatchNormForwardInference";
+      case Thunk::kCudnnBatchNormForwardTraining:
+        return "kCudnnBatchNormForwardTraining";
+      case Thunk::kCustomCall:
+        return "kCustomCall";
+      case Thunk::kNcclAllReduce:
+        return "kNcclAllReduce";
+      case Thunk::kFft:
+        return "kFft";
+      case Thunk::kGemm:
+        return "kGemm";
+      case Thunk::kInfeed:
+        return "kInfeed";
+      case Thunk::kKernel:
+        return "kKernel";
+      case Thunk::kMemset32BitValue:
+        return "kMemset32BitValue";
+      case Thunk::kMemzero:
+        return "kMemzero";
+      case Thunk::kOutfeed:
+        return "kOutfeed";
+      case Thunk::kReplicaId:
+        return "kReplicaId";
+      case Thunk::kSequential:
+        return "kSequential";
+      case Thunk::kTriangularSolve:
+        return "kTriangularSolve";
+      case Thunk::kTuple:
+        return "kTuple";
+      case Thunk::kWhile:
+        return "kWhile";
+      default:
+        return "kUnknown";
+    }
+  }
   absl::optional<int64> profile_index_;
   std::string profile_annotation_;
 };
