@@ -47,7 +47,6 @@ load(
     "//third_party/ngraph:build_defs.bzl",
     "if_ngraph",
 )
-
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts")
 load(
     "//tensorflow/core/platform/default:cuda_build_defs.bzl",
@@ -754,6 +753,7 @@ tf_python_pybind_extension(
 tf_python_pybind_extension(
     name = "_pywrap_nvtx",
     srcs = ["util/nvtx_wrapper.cc"],
+    copts = cuda_default_copts(),
     module_name = "_pywrap_nvtx",
     deps = [
         "//tensorflow/core:framework_headers_lib",
@@ -762,8 +762,7 @@ tf_python_pybind_extension(
         "//third_party/python_runtime:headers",
         "@com_google_absl//absl/strings",
         "@pybind11",
-    ] +  if_cuda_is_configured(["@local_config_cuda//cuda:cuda_headers"]),
-    copts=cuda_default_copts(),
+    ] + if_cuda_is_configured(["@local_config_cuda//cuda:cuda_headers"]),
 )
 
 tf_python_pybind_extension(
@@ -1433,7 +1432,6 @@ py_library(
         ":tensor_util",
         ":type_spec",
         ":util",
-
         "//third_party/py/numpy",
         "@six_archive//:six",
         "//tensorflow/python/eager:context",

@@ -61,6 +61,7 @@ ops.NotDifferentiable('NonMaxSuppressionV2')
 ops.NotDifferentiable('NonMaxSuppressionWithOverlaps')
 ops.NotDifferentiable('GenerateBoundingBoxProposals')
 
+ops.NotDifferentiable('BatchedBoxProposals')
 ops.NotDifferentiable('BatchedNonMaxSuppression')
 ops.NotDifferentiable('CombinedNonMaxSuppression')
 
@@ -5657,6 +5658,36 @@ def generate_bounding_box_proposals(scores,
       bbox_deltas=bbox_deltas,
       image_info=image_info,
       anchors=anchors,
+      nms_threshold=nms_threshold,
+      pre_nms_topn=pre_nms_topn,
+      min_size=min_size,
+      post_nms_topn=post_nms_topn,
+      name=name)
+
+@tf_export('image.batched_box_proposals')
+@dispatch.add_dispatch_support
+def batched_box_proposals(scores,
+                                    bbox_deltas,
+                                    image_info,
+                                    anchors,
+                                    entries_per_level,
+                                    nms_threshold=0.7,
+                                    pre_nms_topn=6000,
+                                    min_size=16,
+                                    post_nms_topn=300,
+                                    name=None):
+  """Generate bounding box proposals from encoded bounding boxes.
+
+  Returns:
+    rois: Region of interest boxes sorted by their scores.
+    roi_probabilities: scores of the ROI boxes in the ROIs' tensor.
+  """
+  return gen_image_ops.batched_box_proposals(
+      scores=scores,
+      bbox_deltas=bbox_deltas,
+      image_info=image_info,
+      anchors=anchors,
+      entries_per_level=entries_per_level,
       nms_threshold=nms_threshold,
       pre_nms_topn=pre_nms_topn,
       min_size=min_size,

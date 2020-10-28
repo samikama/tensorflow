@@ -1,17 +1,17 @@
 #if GOOGLE_CUDA
 #define EIGEN_USE_GPU
 #include <limits>
-#include "tensorflow/core/kernels/batched_non_max_suppression_op.h"
 
 #include "absl/strings/str_cat.h"
 #include "tensorflow/core/framework/numeric_types.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_types.h"
+#include "tensorflow/core/kernels/batched_non_max_suppression_op.h"
+#include "tensorflow/core/kernels/gpu_prim.h"
 #include "tensorflow/core/kernels/transpose_functor.h"
 #include "tensorflow/core/util/gpu_kernel_helper.h"
 #include "tensorflow/core/util/gpu_launch_config.h"
 #include "tensorflow/stream_executor/stream_executor.h"
-#include "tensorflow/core/kernels/gpu_prim.h"
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 // DoTranspose is broken we need to use conv2d swapdimensions1and2intensor3
 #include "tensorflow/core/kernels/conv_2d_gpu.h"
@@ -34,7 +34,6 @@
       return;                                                          \
     }                                                                  \
   } while (0)
-
 
 struct __align__(16) Box {
   float x1, y1, x2, y2;
@@ -357,17 +356,223 @@ __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarp(
   }
 }
 
-template <typename Index>
-__device__ __forceinline__ void SelectHelper(const Index i_selected,
-                                             const Index i_original) {}
+// This op applies Look-Forward style nms. More efficient when max_accept is
+// closer to the maximum number of boxes
+__launch_bounds__(1024) __global__ void NMSApplyAndReduceForwardJagged(
+    const Box* boxes, const int* num_batch_boxes, const int* box_strides,
+    const int max_accept, float iou_threshold, int* selected_counts,
+    char* selection_results) {
+  // boxes, pointer to boxes.
+  // num_batch_boxes, number of boxes in each batch entry.
+  // box_strides, start offset for each batch wrt boxes.
+  // max_accept, maximum box from each batch entry to accept.
+  // iou_threshold, threshold for suppression.
+  // selected_counts, number of selected boxes in each batch entry.
+  // selection_results, selected mask for gathering selected boxes.
+  // Requires batch_size==number of blocks launched since algorithm can only
+  // work in a single block and will fail if expanded to multiple blocks
 
-template <typename Index, typename T, typename... Args>
-__device__ __forceinline__ void SelectHelper(const Index i_selected,
-                                             const Index i_original,
-                                             const T* original, T* selected,
-                                             Args... args) {
-  selected[i_selected] = original[i_original];
-  SelectHelper(i_selected, i_original, args...);
+  extern __shared__ int selected[];
+  int num_boxes =
+      num_batch_boxes[blockIdx.x];  // boxes in current block/image/class
+  int bit_mask_len = (num_boxes + sizeof(int) * 8 - 1) / (sizeof(int) * 8);
+  int box_stride = box_strides[blockIdx.x];
+  const Box* current_boxes = boxes + box_stride;
+  // reset selected array
+  for (int box = threadIdx.x; box < bit_mask_len; box += blockDim.x) {
+    selected[box] = 0xFFFFFFFF;
+  }
+  __syncthreads();
+  int accepted_boxes = 0;  // box 0 is always accepted
+  int last_accepted = -1;
+  for (int box = 0; box < num_boxes; ++box) {
+    if (!CheckBit(selected, box)) {
+      continue;
+    }
+    accepted_boxes += 1;
+    last_accepted = box;
+    if (accepted_boxes >= max_accept) {
+      break;
+    }
+    const Box b = current_boxes[box];
+    float box_area = (b.x2 - b.x1) * (b.y2 - b.y1);
+    // int start = ((box + 1) / blockDim.x) * blockDim.x;
+    for (int target = threadIdx.x; target < num_boxes; target += blockDim.x) {
+      if (target <= box) continue;
+      if (OverThreshold(&b, current_boxes + target, box_area, iou_threshold)) {
+        ClearBit<int>(selected, target);
+      }
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) {
+    selected_counts[blockIdx.x] = accepted_boxes;
+  }
+  __syncthreads();
+  char* curr_results = selection_results + box_stride;
+
+  for (int i = threadIdx.x; i < num_boxes; i += blockDim.x) {
+    if (i <= last_accepted) {
+      curr_results[i] = CheckBit(selected, i);
+    } else {
+      curr_results[i] = 0;
+    }
+  }
+}
+
+// This kernel uses Look-Behind algorithm for nms. More efficient when
+// max_accept/num_of_boxes is close to 0.
+__launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarpJagged(
+    const Box* boxes, const int* num_batch_boxes, const int* box_strides,
+    const int max_accept, float iou_threshold, int* selected_counts,
+    char* selection_results) {
+  // boxes, pointer to boxes.
+  // num_batch_boxes, number of boxes in each batch entry.
+  // box_strides, start offset for each batch wrt boxes.
+  // max_accept, maximum box from each batch entry to accept.
+  // iou_threshold, threshold for suppression.
+  // selected_counts, number of selected boxes in each batch entry.
+  // selection_results, selected mask for gathering selected boxes.
+  // Requires batch_size==number of blocks launched since algorithm can only
+  // work in a single block and will fail if expanded to multiple blocks
+
+  extern __shared__ int shared_buffer[];
+  // Shared data layout
+  // ChunkSize x box -> chunk boxes
+  // ChunkSize x float ->chunk areas
+  // bit_mask_len x int -> selected bitmask
+  // chunk_mask_len x int ->chunk_mask
+
+  const int num_boxes = num_batch_boxes[blockIdx.x];
+  const int box_stride = box_strides[blockIdx.x];
+  const int bit_mask_len =
+      (num_boxes + sizeof(int) * 8 - 1) / (sizeof(int) * 8);
+  const int chunk_mask_size =
+      (kNmsReductionChunkSize + 31) / 32;  // in integers
+  const int num_chunks =
+      (num_boxes + kNmsReductionChunkSize - 1) / kNmsReductionChunkSize;
+
+  // shared memory pointers
+  Box* const chunk = (Box*)shared_buffer;
+  float* const areas = (float*)(chunk + kNmsReductionChunkSize);
+  int* const selected = (int*)(areas + kNmsReductionChunkSize);
+  int* const chunk_mask = selected + bit_mask_len;
+  // global memory pointer
+  const Box* current_boxes = boxes + box_stride;
+
+  for (int box = threadIdx.x; box < bit_mask_len; box += blockDim.x) {
+    selected[box] = 0xFFFFFFFF;
+  }
+  __syncthreads();
+
+  int accepted_boxes = 0;  // box 0 is always accepted
+  int last_accepted = -1;
+
+  for (int c = 0; c < num_chunks; ++c) {
+    const int chunk_begin = c * kNmsReductionChunkSize;
+    const int chunk_size = min(kNmsReductionChunkSize, num_boxes - chunk_begin);
+    // fill the shared box memory
+    for (int i = threadIdx.x; i < chunk_size; i += blockDim.x) {
+      SetBit(chunk_mask, i);
+      chunk[i] = current_boxes[chunk_begin + i];
+      Box* b = chunk + i;
+      areas[i] = (b->y2 - b->y1) * (b->x2 - b->x1);
+    }
+    __syncthreads();
+    // previous chunks
+    for (int target = threadIdx.x; target < chunk_begin; target += blockDim.x) {
+      bool active = CheckBit(selected, target);
+      bool any_accept = __any_sync(0xFFFFFFFF, active);
+      if (!any_accept) {  // if all warp is disabled, continue
+        continue;
+      }
+      int eliminated_chunks = 0;
+      // take all the boxes in shared memory chunk and create an overlap mask
+      // and check if any of the previously accepted boxes eliminate this box
+      for (int in_chunk = 0; in_chunk < chunk_mask_size; in_chunk++) {
+        int chunk_state = chunk_mask[in_chunk];
+        bool warp_active = __any_sync(0xFFFFFFFF, chunk_state);
+        if (!warp_active) {
+          eliminated_chunks += 1;
+          continue;
+        }
+        int in_warp_mask = 0xFFFFFFFF;
+        int const warp_offset = in_chunk * 32;
+        if (active) {
+          // loop over 32 boxes in the chunk compare it with target
+          for (int in_warp = 0; in_warp < 32; ++in_warp) {
+            if (OverThreshold(chunk + warp_offset + in_warp,
+                              current_boxes + target,
+                              areas[warp_offset + in_warp], iou_threshold)) {
+              in_warp_mask ^= (1 << in_warp);
+            }
+          }
+        }
+        // do a warp reduce
+        for (int o = 16; o > 0; o >>= 1) {
+          in_warp_mask &= __shfl_down_sync(0xFFFFFFFF, in_warp_mask, o);
+        }
+        // update the chunk mask with the first thread of the warp
+        if ((threadIdx.x & 31) == 0) {
+          atomicAnd(chunk_mask + in_chunk, in_warp_mask);
+        }
+      }
+
+      bool all_eliminated = (eliminated_chunks == chunk_mask_size);
+      bool dont_have_boxes = __all_sync(0xFFFFFFFF, all_eliminated);
+      // if all threads have all the chunk boxes eliminated break
+      if (dont_have_boxes) break;
+    }
+    __syncthreads();
+    // Within a chunk
+    // now do the elimination within a chunk. Check if any of the higher scoring
+    // boxes in the chunk eliminate a lower scoring one
+    for (int i = 0; i < chunk_size; ++i) {
+      // look backward
+      bool active = CheckBit<int>(chunk_mask, i);
+      int accepted = 1;
+      if (active) {
+        for (int j = threadIdx.x; j < i; j += blockDim.x) {
+          if (CheckBit(chunk_mask, j) &&
+              OverThreshold(chunk + i, chunk + j, areas[i], iou_threshold)) {
+            accepted = 0;
+          }
+        }
+      }
+      bool all_accept = __all_sync(0xFFFFFFFF, accepted);
+      // 0th thread in warp has reduced value
+      if (!all_accept && ((threadIdx.x & 31) == 0)) {
+        ClearBit<int>(chunk_mask, i);
+      }
+      __syncthreads();
+      if (CheckBit(chunk_mask, i)) {
+        accepted_boxes += 1;
+        last_accepted = chunk_begin + i;
+        if (accepted_boxes >= max_accept) {
+          break;
+        }
+      } else {
+        if (threadIdx.x == 0) {
+          ClearBit<int>(selected, chunk_begin + i);
+        }
+      }
+    }
+    __syncthreads();
+    if (accepted_boxes >= max_accept) break;
+  }
+
+  if (threadIdx.x == 0) {
+    selected_counts[blockIdx.x] = accepted_boxes;
+  }
+  __syncthreads();
+  char* curr_results = selection_results + box_stride;
+  for (int i = threadIdx.x; i < num_boxes; i += blockDim.x) {
+    if (i <= last_accepted) {
+      curr_results[i] = CheckBit(selected, i);
+    } else {
+      curr_results[i] = 0;
+    }
+  }
 }
 
 __global__ void BroadcastBoxes(const int num_boxes, const int num_classes,
@@ -400,24 +605,6 @@ __global__ void BroadcastBoxes(const int num_boxes, const int num_classes,
   }
 }
 
-// Batch version of IndexMultiSelect, num_elemets contains number of elements in
-// each entry offsets is the offsets of batch entries,
-template <typename Index, typename T, typename... Args>
-__global__ void BatchedIndexMultiSelect(const int* num_elements,
-                                        const int* input_strides,
-                                        const int* output_strides,
-                                        int batch_size, const Index* indices,
-                                        const T* original, T* selected,
-                                        Args... args) {
-  for (const int y : CudaGridRangeY(batch_size)) {
-    int istride = input_strides[y];
-    int ostride = output_strides[y];
-    for (const int idx : CudaGridRangeX(num_elements[y])) {
-      SelectHelper(idx + ostride, istride + indices[idx + istride], original,
-                   selected, args...);
-    }
-  }
-}
 // Batch version of IndexMultiSelect, num_elemets contains number of elements in
 // each entry offsets is the offsets of batch entries,
 __global__ void TransposedBoxSelect(
@@ -456,6 +643,22 @@ __global__ void Iota(const int num_elements, const T offset, T* to_fill,
   for (int i : CudaGridRangeY(batch_size)) {
     T* img = to_fill + (i * num_elements);
     for (int idx : CudaGridRangeX(num_elements)) {
+      img[idx] = static_cast<T>(idx) + offset;
+    }
+  }
+}
+
+template <typename T>
+__global__ void IotaJagged(const int* device_counts,
+                           const int* device_begin_offsets, const T offset,
+                           T* to_fill, int batch_size) {
+  for (int i : GpuGridRangeY(batch_size)) {
+    int stride = device_begin_offsets[i];
+    T* img = to_fill + stride;
+    // if(threadIdx.x==0){
+    //   printf("y=%d t(%d %d) b(%d %d) offset=%d count=%d\n",i,threadIdx.x,threadIdx.y,blockIdx.x,blockIdx.y,stride,device_counts[i]);
+    // }
+    for (int idx : GpuGridRangeX(device_counts[i])) {
       img[idx] = static_cast<T>(idx) + offset;
     }
   }
@@ -505,15 +708,46 @@ __launch_bounds__(1024) __global__
   }
 }
 
+__launch_bounds__(1024) __global__
+    void FindPartitionIndexJagged(const float* sorted_scores,
+                                  const int* num_boxes, const float threshold,
+                                  int* partitions) {
+  // do this block by block it shouldn't matter much
+  size_t offset = 0;
+  int n_boxes = num_boxes[blockIdx.x];
+  if (n_boxes == 0) {
+    partitions[blockIdx.x] = 0;
+    return;
+  }
+  for (int i = 0; i < blockIdx.x; ++i) offset += num_boxes[i];
+  const float* scores = sorted_scores + offset;
+  __syncthreads();
+  for (int i = threadIdx.x; i < n_boxes - 1; i += blockDim.x) {
+    if (scores[i] > threshold) {
+      if (scores[i + 1] <= threshold) {
+        partitions[blockIdx.x] = i + 1;
+      }
+    } else {
+      if (i == 0) {
+        partitions[blockIdx.x] = 0;
+      };
+      break;
+    }
+  }
+  if (threadIdx.x == 0 && scores[n_boxes - 1] > threshold) {
+    partitions[blockIdx.x] = n_boxes;
+  }
+}
+
 template <bool clipped>
 __global__ void CombineClasses(
     const int* indices,  // Selected box indices per batch per class from
-                         // DoNMSBatched [batch,num_classes,per_class_stride]
-    const int per_class_stride,  // output per_class stride from DoNmsBatched
+                         // DoNMSBatchedGPU [batch,num_classes,per_class_stride]
+    const int per_class_stride,  // output per_class stride from DoNMSBatchedGPU
     const Box* boxes,  // transposed boxes, [batch_size*numclasses,num_boxes,4]
     const float* scores,  //  transposed scores [batch,num_classes,num_boxes]
     const int* num_selections,  // number of selected boxes in each class from
-                                // [batch*num_classes] DoNMSBatched
+                                // [batch*num_classes] DoNMSBatchedGPU
     const int num_boxes,        // number of input boxes
     const int num_batches,      // number of batches
     const int num_classes,      // number of classes per batch
@@ -574,12 +808,12 @@ __global__ void CombineClasses(
   }
 }
 
-Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
-                    const Tensor& scores, const Tensor& box_counts_tensor,
-                    const int max_output_size, const float iou_threshold_val,
-                    const float score_threshold, bool pad_to_max_output,
-                    int* num_saved_outputs, Tensor** output_indices, int kernel,
-                    bool pre_sorted_inputs = false) {
+Status DoNMSBatchedGPU(OpKernelContext* context, const Tensor& boxes,
+                       const Tensor& scores, const Tensor& box_counts_tensor,
+                       const int max_output_size, const float iou_threshold_val,
+                       const float score_threshold, bool pad_to_max_output,
+                       int* num_saved_outputs, Tensor** output_indices,
+                       int kernel, bool pre_sorted_inputs) {
   int batch_size = boxes.dim_size(0);
   auto cuda_stream = GetGpuStream(context);
   auto device = context->eigen_gpu_device();
@@ -642,14 +876,14 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
     TF_RETURN_IF_CUDA_ERROR(cudaGetLastError());
   }
   size_t flagged_buffer_size = 0;
-  cuda_ret =
-      gpuprim::DeviceSelect::Flagged(static_cast<void*>(nullptr),  // temp_storage
-                                 flagged_buffer_size,
-                                 static_cast<int*>(nullptr),   // input
-                                 static_cast<char*>(nullptr),  // selection flag
-                                 static_cast<int*>(nullptr),   // selected items
-                                 static_cast<int*>(nullptr),   // num_selected
-                                 max_boxes * batch_size, device.stream());
+  cuda_ret = gpuprim::DeviceSelect::Flagged(
+      static_cast<void*>(nullptr),  // temp_storage
+      flagged_buffer_size,
+      static_cast<int*>(nullptr),   // input
+      static_cast<char*>(nullptr),  // selection flag
+      static_cast<int*>(nullptr),   // selected items
+      static_cast<int*>(nullptr),   // num_selected
+      max_boxes * batch_size, device.stream());
   TF_RETURN_IF_CUDA_ERROR(cuda_ret);
   TF_RETURN_IF_CUDA_ERROR(cudaGetLastError());
 
@@ -693,7 +927,6 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
   // this will return sorted scores and their indices
   // initialize box and score indices
   auto config2d = GetGpu2DLaunchConfig(max_boxes, batch_size, device);
-
   TF_RETURN_IF_ERROR(GpuLaunchKernel(
       Iota<int>, config2d.block_count, config2d.thread_per_block, 0,
       device.stream(), max_boxes, 0, d_indices.flat<int>().data(), batch_size));
@@ -767,6 +1000,7 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
   int bitmask_length_bytes =
       ((max_boxes + sizeof(int) * 8 - 1) / (sizeof(int) * 8)) * sizeof(int);
   // simple heuristics for auto selecting which kernel to use
+  kernel = 0;
   if (kernel == -1) {
     float suppression_ratio = (double)max_output_size / (double)max_boxes;
     kernel = 0;
@@ -795,6 +1029,7 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
         max_output_size, max_boxes, iou_threshold_val, num_saved_outputs,
         selection_mask));
   }
+  // CheckKernel(context, "After NMS");
   // There is no guarantee that boxes are given in the for x1<x2 and/or y1<y2,
   Tensor selected_counts_host_tensor;
   TF_RETURN_IF_ERROR(
@@ -844,7 +1079,6 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
       device.stream());
   TF_RETURN_IF_CUDA_ERROR(cuda_ret);
 
-
   config2d = GetGpu2DLaunchConfig(max_boxes, batch_size, device);
   TF_RETURN_IF_ERROR(GpuLaunchKernel(
       BatchIndexScatter, config2d.block_count, config2d.thread_per_block, 0,
@@ -864,6 +1098,357 @@ Status DoNMSBatched(OpKernelContext* context, const Tensor& boxes,
                       num_saved_outputs, device_begin_offsets,
                       device_begin_offsets + batch_size, batch_size,
                       device_selected_indices + (max_boxes * batch_size),
+                      d_sorted_indices.flat<int>().data(),
+                      (*output_indices)->flat<int>().data()));
+
+  return Status::OK();
+}
+
+Status DoNMSBatchedGPUJagged(
+    OpKernelContext* context, const Tensor& boxes, const Tensor& scores,
+    const Tensor& box_counts_tensor, const int max_output_size,
+    const float iou_threshold_val, const float score_threshold,
+    bool pad_to_max_output, int* num_saved_outputs, Tensor** output_indices,
+    int kernel, bool pre_sorted_inputs) {
+  int batch_size = box_counts_tensor.dim_size(0);
+  auto cuda_stream = GetGpuStream(context);
+  auto device = context->eigen_gpu_device();
+  const int* box_counts = box_counts_tensor.flat<int>().data();
+  int max_boxes = 0;
+  int total_boxes = 0;
+  AllocatorAttributes alloc_attr;
+  alloc_attr.set_on_host(true);
+  alloc_attr.set_gpu_compatible(true);
+  Tensor begin_end_offsets_host_tensor;
+  TF_RETURN_IF_ERROR(
+      context->allocate_temp(DataType::DT_INT32, TensorShape({3 * batch_size}),
+                             &begin_end_offsets_host_tensor, alloc_attr));
+  int* begin_end_offsets = begin_end_offsets_host_tensor.flat<int>().data();
+  // LOG(INFO) << dumpDeviceTensor<int>("Input box_counts", box_counts_tensor,
+  //                                    context);
+  for (int i = 0; i < batch_size; ++i) {
+    total_boxes += box_counts[i];
+    max_boxes = max(max_boxes, box_counts[i]);
+  }
+  int begin_offset = 0;
+  for (int i = 0; i < batch_size; ++i) {
+    begin_end_offsets[i]=box_counts[i];
+    begin_end_offsets[batch_size+i] = begin_offset;
+    begin_offset += box_counts[i];
+    begin_end_offsets[2*batch_size + i] = begin_end_offsets[i+batch_size] + box_counts[i];
+  }
+  if (max_boxes == 0) {
+    TF_RETURN_IF_ERROR(context->allocate_temp(
+        DataType::DT_INT32, TensorShape({0}), *output_indices));
+    device.memset(num_saved_outputs, 0, sizeof(int) * batch_size);
+    return Status::OK();
+  }
+  // This is actually true for post score selection number of boxes rather than
+  // maximum input but that would require copying selection results to host and
+  // synchronize.
+  if (max_boxes > device.sharedMemPerBlock() * 8) {
+    return errors::InvalidArgument(StrCat(
+        "This op can not handle more than ", device.sharedMemPerBlock() * 8,
+        " boxes in any of the batch elements while maximum number of boxes in "
+        "at least one of the elements is ",
+        max_boxes));
+  }
+
+  size_t cub_temp_storage_bytes = 0;
+  cudaError_t cuda_ret = cudaSuccess;
+  if (!pre_sorted_inputs) {
+    // Calling cub with nullptrs as inputs will make it return
+    // workspace size needed for the operation instead of doing the operation.
+    // In this specific instance, cub_sort_storage_bytes will contain the
+    // necessary workspace size for sorting after the call.
+    cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
+        nullptr, cub_temp_storage_bytes,
+        static_cast<float*>(nullptr),  // scores
+        static_cast<float*>(nullptr),  // sorted scores
+        static_cast<int*>(nullptr),    // input indices
+        static_cast<int*>(nullptr),    // sorted indices
+        total_boxes,                   // Total number of boxes in batch
+        batch_size,                    // num segments
+        static_cast<int*>(nullptr), static_cast<int*>(nullptr), 0,
+        8 * sizeof(float),  // sort all bits
+        cuda_stream);
+    TF_RETURN_IF_CUDA_ERROR(cuda_ret);
+    TF_RETURN_IF_CUDA_ERROR(cudaGetLastError());
+  }
+  size_t flagged_buffer_size = 0;
+  cuda_ret = gpuprim::DeviceSelect::Flagged(
+      static_cast<void*>(nullptr),  // temp_storage
+      flagged_buffer_size,
+      static_cast<int*>(nullptr),   // input
+      static_cast<char*>(nullptr),  // selection flag
+      static_cast<int*>(nullptr),   // selected items
+      static_cast<int*>(nullptr),   // num_selected
+      total_boxes, device.stream());
+  TF_RETURN_IF_CUDA_ERROR(cuda_ret);
+  TF_RETURN_IF_CUDA_ERROR(cudaGetLastError());
+
+  cub_temp_storage_bytes =
+      std::max(cub_temp_storage_bytes, flagged_buffer_size);
+  Tensor d_cub_temp_buffer;
+  Tensor d_indices;
+  Tensor d_selected_indices;
+  Tensor d_sorted_boxes;
+  Tensor d_sorted_indices;
+  Tensor d_sorted_scores;
+  Tensor d_selection_mask;
+
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      DataType::DT_INT8, TensorShape({(int64)cub_temp_storage_bytes}),
+      &d_cub_temp_buffer));
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      DataType::DT_INT32, TensorShape({total_boxes}), &d_indices));
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      DataType::DT_INT32, TensorShape({total_boxes * 2}), &d_selected_indices));
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      DataType::DT_INT8, TensorShape({total_boxes}), &d_selection_mask));
+  // If the inputs are already sorted, we don't need to sort them again.
+  if (!pre_sorted_inputs) {
+    TF_RETURN_IF_ERROR(context->allocate_temp(
+        DataType::DT_INT32, TensorShape({total_boxes}), &d_sorted_indices));
+    TF_RETURN_IF_ERROR(context->allocate_temp(
+        DataType::DT_FLOAT, TensorShape({total_boxes}), &d_sorted_scores));
+    TF_RETURN_IF_ERROR(context->allocate_temp(
+        DataType::DT_FLOAT, TensorShape({total_boxes, 4}), &d_sorted_boxes));
+  } else {
+    d_sorted_indices = d_indices;
+    d_sorted_scores = scores;
+    d_sorted_boxes = boxes;
+  }
+  // this will return sorted scores and their indices
+  // initialize box and score indices
+  Tensor device_begin_end_offsets_tensor;
+  Tensor device_selected_counts_tensor;
+  TF_RETURN_IF_ERROR(context->allocate_temp(DataType::DT_INT32,
+                                            begin_end_offsets_host_tensor.shape(),
+                                            &device_begin_end_offsets_tensor));
+  TF_RETURN_IF_ERROR(context->allocate_temp(DataType::DT_INT32,
+                                            TensorShape({batch_size}),
+                                            &device_selected_counts_tensor));
+
+  int* device_selected_counts = device_selected_counts_tensor.flat<int>().data();
+  int* device_box_counts=device_begin_end_offsets_tensor.flat<int>().data();
+  int* device_begin_offsets = device_box_counts+batch_size;
+
+  // copy the offsets to the device
+  device.memcpyHostToDevice(device_box_counts, begin_end_offsets,
+                            sizeof(int) * begin_end_offsets_host_tensor.NumElements());
+  // LOG(INFO) << dumpDeviceTensor<int>("BNMS device_begin_offsets",
+  //                                    device_begin_end_offsets_tensor, context);
+  auto config2d = GetGpu2DLaunchConfig(max_boxes, batch_size, device);
+  // LOG(INFO)<<" Blocks=( "<<config2d.block_count.x<<", "<<config2d.block_count.y<<", "<<config2d.block_count.z<<" ) threads=( "
+  // <<config2d.thread_per_block.x<<", "<<config2d.thread_per_block.y<<", "<<config2d.thread_per_block.z<<")";
+
+  TF_RETURN_IF_ERROR(GpuLaunchKernel(
+      IotaJagged<int>, config2d.block_count, config2d.thread_per_block, 0,
+      device.stream(), device_box_counts, device_begin_offsets, 0,
+      d_indices.flat<int>().data(), batch_size));
+  // LOG(INFO) << dumpDeviceTensor<int>("IotaJagged device_begin_offsets",
+  //                                    device_begin_end_offsets_tensor, context);
+  
+  if (!pre_sorted_inputs) {
+    // sort the inputs by scores
+    cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
+        d_cub_temp_buffer.flat<int8>().data(), cub_temp_storage_bytes,
+        scores.flat<float>().data(),           // scores
+        d_sorted_scores.flat<float>().data(),  // sorted scores
+        d_indices.flat<int>().data(),          // input indices
+        d_sorted_indices.flat<int>().data(),   // sorted indices
+        total_boxes,                           // Total number of boxes in batch
+        batch_size,                            // num segments
+        device_begin_offsets, device_begin_offsets + batch_size, 0,
+        8 * sizeof(float),  // sort all bits
+        cuda_stream);
+    if (cuda_ret != cudaSuccess) {
+      return errors::Internal(
+          "BatchedNMS sorting could not launch "
+          "gpuprim::DeviceSegmentedRadixSort::SortPairsDescending to sort "
+          "temp_storage_bytes: ",
+          cub_temp_storage_bytes, ", status: ", cudaGetErrorString(cuda_ret));
+    }
+  }
+  //CheckKernel(context,"CUBSort BatchedNMS");
+  if (score_threshold > std::numeric_limits<float>::lowest()) {
+    // copy the box counts to the device
+    // device.memcpyHostToDevice(device_box_counts, box_counts,
+    //                           sizeof(int) * batch_size);
+    // // find the index of the box that is below the threshold
+    // and put it in device_box_counts
+    TF_RETURN_IF_ERROR(
+        GpuLaunchKernel(FindPartitionIndexJagged, batch_size, 1024, 0,
+                        device.stream(), d_sorted_scores.flat<float>().data(),
+                        device_box_counts, score_threshold, device_box_counts));
+  // } else {
+  //   device.memcpyHostToDevice(device_box_counts, box_counts,
+  //                             sizeof(int) * batch_size);
+  }
+  // LOG(INFO) << dumpDeviceTensor<int>("AfterFindPartition device counts",
+  //                                    device_box_counts_tensor, context);
+  // LOG(INFO) << dumpDeviceTensor<int>("AfterFindPartition device offsets",
+  //                                    device_begin_end_offsets_tensor, context);
+  if (!pre_sorted_inputs) {
+    // select the first elements from boxes and scores where box score is above
+    // thresholf
+    TF_RETURN_IF_ERROR(GpuLaunchKernel(
+        BatchedIndexMultiSelect<int, Box>, config2d.block_count,
+        config2d.thread_per_block, 0, device.stream(),
+        /*num_elements=*/device_box_counts,
+        /*input_strides=*/device_begin_offsets,
+        /*output_strides=*/device_begin_offsets,
+        /*batch_size=*/batch_size,
+        /*indices=*/d_sorted_indices.flat<int>().data(),
+        /*original=*/
+        reinterpret_cast<const Box*>(boxes.flat<float>().data()),
+        /*selected=*/
+        reinterpret_cast<Box*>(d_sorted_boxes.flat<float>().data())));
+  }
+  // LOG(INFO) << dumpDeviceTensor<int>("After sorting BIMS device offsets",
+  //                                    device_begin_end_offsets_tensor, context);
+  config2d = GetGpu2DLaunchConfig(max_boxes, batch_size, device);
+  Box* sorted_boxes =
+      reinterpret_cast<Box*>(d_sorted_boxes.flat<float>().data());
+  char* selection_mask =
+      reinterpret_cast<char*>(d_selection_mask.flat<int8>().data());
+  // Make sure that the boxes are flipped to ensure x1<x2 and y1<y2
+
+  // flip the boxes if they are not formatted in (x1,y1,x2,y2) where x1<x2 and
+  // y1<y2
+  TF_RETURN_IF_ERROR(GpuLaunchKernel(
+      FlipBoxes, config2d.block_count, config2d.thread_per_block, 0,
+      device.stream(), sorted_boxes, device_box_counts, device_begin_offsets,
+      batch_size));
+  //CheckKernel(context, "FlipBoxes");
+  int bitmask_length_bytes =
+      ((max_boxes + sizeof(int) * 8 - 1) / (sizeof(int) * 8)) * sizeof(int);
+  // simple heuristics for auto selecting which kernel to use
+  kernel = 0;
+
+  if (kernel == -1) {
+    float suppression_ratio = (double)max_output_size / (double)max_boxes;
+    kernel = 0;
+    if (max_output_size <= 2000) {
+      kernel = 0;
+    } else if ((max_boxes >= 10000) && (suppression_ratio >= .20)) {
+      kernel = 1;
+    } else if (max_output_size >= 50000) {
+      kernel = 1;
+    }
+  }
+  // Apply nms and put the selected box counts to num_saved_outputs.
+  if (kernel == 1) {  // use Look-Forward kernel
+    TF_RETURN_IF_ERROR(GpuLaunchKernel(
+        NMSApplyAndReduceForwardJagged, batch_size, 1024, bitmask_length_bytes,
+        device.stream(), sorted_boxes, device_box_counts, device_begin_offsets,
+        max_output_size, iou_threshold_val, num_saved_outputs, selection_mask));
+  } else if (kernel == 0) {  // Use Look-Backward kernel
+    int shm_size = bitmask_length_bytes +
+                   (sizeof(float) * 5) * kNmsReductionChunkSize +
+                   (kNmsReductionChunkSize + sizeof(int) * 8 - 1) / 8;
+    shm_size += 8;
+    TF_RETURN_IF_ERROR(GpuLaunchKernel(
+        NMSApplyAndReduceChunkedInWarpJagged, batch_size, 1024, shm_size,
+        device.stream(), sorted_boxes, device_box_counts, device_begin_offsets,
+        max_output_size, iou_threshold_val, num_saved_outputs, selection_mask));
+  }
+  // LOG(INFO) << dumpDeviceTensor<int>("Num elements after nms",
+  //                                    num_saved_outputs, batch_size, context);
+  // There is no guarantee that boxes are given in the for x1<x2 and/or y1<y2,
+  Tensor selected_counts_host_tensor;
+  TF_RETURN_IF_ERROR(
+      context->allocate_temp(DataType::DT_INT32, TensorShape({batch_size}),
+                             &selected_counts_host_tensor, alloc_attr));
+
+  int* selected_counts = selected_counts_host_tensor.flat<int>().data();
+  // copy the selected box counts to the host
+  device.memcpyDeviceToHost(selected_counts, num_saved_outputs,
+                            sizeof(int) * batch_size);
+  // it is possible to drop this device.synchronize() if this becomes an async
+  // operation
+  device.synchronize();
+  int num_outputs = 0;
+  int max_selected = 0;
+  int total_selected = 0;
+  for (int i = 0; i < batch_size; ++i) {
+    total_selected += selected_counts[i];
+    max_selected = std::max(max_selected, selected_counts[i]);
+  }
+
+  num_outputs = std::min(max_selected, (int)max_output_size);
+  // allocate the output tensor
+  if (pad_to_max_output && num_outputs != max_output_size) {
+    TF_RETURN_IF_ERROR(context->allocate_temp(
+        DataType::DT_INT32, TensorShape({batch_size * max_output_size}),
+        *output_indices));
+    auto config = GetGpuLaunchConfig((*output_indices)->NumElements(), device);
+    TF_CHECK_OK(GpuLaunchKernel(SetZero<int>, config.block_count,
+                                config.thread_per_block, 0, device.stream(),
+                                config.virtual_thread_count,
+                                (*output_indices)->flat<int>().data()));
+    num_outputs = max_output_size;
+  } else {
+    TF_RETURN_IF_ERROR(context->allocate_temp(
+        DataType::DT_INT32, TensorShape({total_selected}), *output_indices));
+  }
+  if (num_outputs == 0) {
+    device.memset(num_saved_outputs, 0, sizeof(int) * batch_size);
+    return Status::OK();
+  }
+
+  int* device_selected_indices = d_selected_indices.flat<int>().data();
+  // select the indices of the selected counts. We are reusing d_indices since
+  // it already has iota filled indices on device memory
+  cuda_ret = gpuprim::DeviceSelect::Flagged(
+      d_cub_temp_buffer.flat<int8>().data(),  // temp_storage
+      cub_temp_storage_bytes,
+      d_indices.flat<int>().data(),  // input
+      selection_mask,                // selection flag
+      device_selected_indices,       // output selected items
+      device_selected_counts,        // output counts
+      total_boxes,                   // number of elements
+      device.stream());
+  TF_RETURN_IF_CUDA_ERROR(cuda_ret);
+
+  config2d = GetGpu2DLaunchConfig(max_boxes, batch_size, device);
+  // flagged concatenates all the results in a contiguous array
+  // we want them to be in each batches respective start in case of padded
+  // outputs after that each selected entry list will start at
+  // device_begin_offsets[b] for each batch b
+  TF_RETURN_IF_ERROR(GpuLaunchKernel(
+      BatchIndexScatter, config2d.block_count, config2d.thread_per_block, 0,
+      device.stream(), num_saved_outputs, device_begin_offsets, batch_size,
+      device_selected_indices, device_selected_indices + total_boxes));
+
+  // reuse device_begin_end_offsets+batchsize for offsets in the output tensor
+  // if padded it is every num_outputs step
+  if (pad_to_max_output) {
+    for (int i = 0; i < batch_size; ++i) {
+      begin_end_offsets[i] = i * num_outputs;
+    }
+  } else {
+    // if output is not padded, then the ouput offsets are number of selected
+    // boxes
+    int selected_offset = 0;
+    for (int i = 0; i < batch_size; ++i) {
+      begin_end_offsets[i] = selected_offset;
+      selected_offset += selected_counts[i];
+    }
+  }
+  device.memcpyHostToDevice(device_begin_offsets + batch_size,
+                            begin_end_offsets, sizeof(int) * batch_size);
+  // output_indices will contain selected indices of each batch concatenated
+  // num_saved_outputs will contain number of entries in each selected batch
+  // element
+  TF_RETURN_IF_ERROR(
+      // input and output offsets are different!
+      GpuLaunchKernel(BatchedIndexMultiSelect<int, int>, config2d.block_count,
+                      config2d.thread_per_block, 0, device.stream(),
+                      num_saved_outputs, device_begin_offsets,
+                      device_begin_offsets + batch_size, batch_size,
+                      device_selected_indices + total_boxes,
                       d_sorted_indices.flat<int>().data(),
                       (*output_indices)->flat<int>().data()));
 
@@ -986,19 +1571,124 @@ Status SortScores(OpKernelContext* context, int batch_size, int num_classes,
       device.stream(), num_boxes, 0, indices->template flat<int>().data(),
       batch_size * num_classes));
 
-  TF_RETURN_IF_CUDA_ERROR(gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
-      temp_buffer->flat<int8>().data(), cub_temp_storage_bytes,
-      input_scores->flat<float>().data(),    // scores
-      sorted_scores->flat<float>().data(),   // sorted scores
-      indices->flat<int>().data(),           // input indices
-      sorted_indices->flat<int>().data(),    // sorted indices
-      batch_size * num_classes * num_boxes,  // Total number of boxes in batch
-      batch_size * num_classes,              // num segments
-      device_begin_offsets, device_begin_offsets + batch_size * num_classes, 0,
-      8 * sizeof(float),  // sort all bits
-      cuda_stream));
+  TF_RETURN_IF_CUDA_ERROR(
+      gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
+          temp_buffer->flat<int8>().data(), cub_temp_storage_bytes,
+          input_scores->flat<float>().data(),   // scores
+          sorted_scores->flat<float>().data(),  // sorted scores
+          indices->flat<int>().data(),          // input indices
+          sorted_indices->flat<int>().data(),   // sorted indices
+          batch_size * num_classes *
+              num_boxes,             // Total number of boxes in batch
+          batch_size * num_classes,  // num segments
+          device_begin_offsets, device_begin_offsets + batch_size * num_classes,
+          0,
+          8 * sizeof(float),  // sort all bits
+          cuda_stream));
   return Status::OK();
 }
+
+Status SortScoresJagged(
+    OpKernelContext* context, int batch_size, int num_classes,
+    int* num_boxes,  // num_batches x num_classes entries [Batch,Class,1]
+    Tensor* input_scores, Tensor* indices, Tensor* sorted_scores,
+    Tensor* sorted_indices, Tensor* temp_buffer, Tensor* device_offsets,
+    bool use_given_offsets = false) {
+  size_t cub_temp_storage_bytes = 0;
+  cudaError_t cuda_ret = cudaSuccess;
+  auto cuda_stream = GetGpuStream(context);
+  auto device = context->eigen_gpu_device();
+  int total_boxes = 0;
+  int max_boxes = 0;
+  for (int b = 0; b < batch_size; ++b) {
+    for (int c = 0; c < num_classes; ++c) {
+      total_boxes += num_boxes[b * num_classes + c];
+      max_boxes = max(num_boxes[b * num_classes + c], max_boxes);
+    }
+  }
+
+  cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
+      nullptr, cub_temp_storage_bytes,
+      static_cast<float*>(nullptr),  // scores
+      static_cast<float*>(nullptr),  // sorted scores
+      static_cast<int*>(nullptr),    // input indices
+      static_cast<int*>(nullptr),    // sorted indices
+      total_boxes,                   // Total number of boxes in batch
+      batch_size * num_classes,      // num segments
+      static_cast<int*>(nullptr), static_cast<int*>(nullptr), 0,
+      8 * sizeof(float),  // sort all bits
+      cuda_stream);
+  TF_RETURN_IF_CUDA_ERROR(cuda_ret);
+  TF_RETURN_IF_CUDA_ERROR(cudaGetLastError());
+  if (temp_buffer->NumElements() == 0 ||
+      temp_buffer->NumElements() < cub_temp_storage_bytes) {
+    TF_RETURN_IF_ERROR(context->allocate_temp(
+        DataType::DT_INT8, TensorShape({(int64)cub_temp_storage_bytes}),
+        temp_buffer));
+  }
+  if (device_offsets->NumElements() == 0 || !use_given_offsets) {
+    TF_RETURN_IF_ERROR(context->allocate_temp(
+        DataType::DT_INT32, TensorShape({3 * batch_size * num_classes}),
+        device_offsets));
+    AllocatorAttributes alloc_attr;
+    alloc_attr.set_on_host(true);
+    alloc_attr.set_gpu_compatible(true);
+
+    Tensor begin_end_offsets_tensor;
+    TF_RETURN_IF_ERROR(context->allocate_temp(
+        DataType::DT_INT32, TensorShape({batch_size * num_classes * 3}),
+        &begin_end_offsets_tensor, alloc_attr));
+    int* begin_end_offsets = begin_end_offsets_tensor.flat<int>().data();
+    int begin_offset = 0;
+    for (int i = 0; i < batch_size * num_classes; ++i) {
+      begin_end_offsets[i] = begin_offset;
+      begin_offset += num_boxes[i];
+      begin_end_offsets[batch_size * num_classes + i] =
+          begin_end_offsets[i] + num_boxes[i];
+      begin_end_offsets[i + 2 * batch_size * num_classes] = num_boxes[i];
+    }
+    device.memcpyHostToDevice(
+        device_offsets->flat<int>().data(), begin_end_offsets,
+        sizeof(int) * begin_end_offsets_tensor.NumElements());
+  }
+  int* device_begin_offsets = device_offsets->flat<int>().data();
+
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      DataType::DT_INT32, TensorShape({total_boxes}), indices));
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      DataType::DT_INT32, TensorShape({total_boxes}), sorted_indices));
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      DataType::DT_FLOAT, TensorShape({total_boxes}), sorted_scores));
+
+  auto config2d =
+      GetGpu2DLaunchConfig(max_boxes, batch_size * num_classes, device);
+
+  TF_RETURN_IF_ERROR(GpuLaunchKernel(
+      IotaJagged<int>, config2d.block_count, config2d.thread_per_block, 0,
+      device.stream(), num_boxes, device_begin_offsets, 0,
+      indices->template flat<int>().data(), batch_size * num_classes));
+
+  TF_RETURN_IF_CUDA_ERROR(
+      gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
+          temp_buffer->flat<int8>().data(), cub_temp_storage_bytes,
+          input_scores->flat<float>().data(),   // scores
+          sorted_scores->flat<float>().data(),  // sorted scores
+          indices->flat<int>().data(),          // input indices
+          sorted_indices->flat<int>().data(),   // sorted indices
+          total_boxes,               // Total number of boxes in batch
+          batch_size * num_classes,  // num segments
+          device_begin_offsets, device_begin_offsets + batch_size * num_classes,
+          0,
+          8 * sizeof(float),  // sort all bits
+          cuda_stream));
+  return Status::OK();
+}
+
+////////////////////////////////////////////////////
+///
+///   Batched NMS GPU implementation
+///
+///////////////////////////////////////////////////
 
 class BatchedNonMaxSuppressionGPUOp : public OpKernel {
  public:
@@ -1054,10 +1744,10 @@ class BatchedNonMaxSuppressionGPUOp : public OpKernel {
     Tensor output_tensor;
     Tensor* output_ptr = &output_tensor;
     OP_REQUIRES_OK(
-        context, DoNMSBatched(context, boxes, scores, box_counts, output_size,
-                              iou_threshold_val, score_threshold_val,
-                              pad_to_max_output_size_, num_outputs, &output_ptr,
-                              kernel_));
+        context,
+        DoNMSBatchedGPU(context, boxes, scores, box_counts, output_size,
+                        iou_threshold_val, score_threshold_val,
+                        pad_to_max_output_size_, num_outputs, &output_ptr, 0));
     context->set_output(0, output_tensor);
     return;
   }
@@ -1067,6 +1757,11 @@ class BatchedNonMaxSuppressionGPUOp : public OpKernel {
   int kernel_;
 };
 
+///////////////////////////////////////////////////
+/////
+/////   Combined NMS GPU implementation
+/////
+///////////////////////////////////////////////////
 class CombinedNonMaxSuppressionGPUOp : public OpKernel {
  public:
   explicit CombinedNonMaxSuppressionGPUOp(OpKernelConstruction* context)
@@ -1290,10 +1985,11 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
                                         &per_class_outputs_tensor));
     int* per_class_outputs = per_class_outputs_tensor.flat<int>().data();
     OP_REQUIRES_OK(
-        context, DoNMSBatched(context, reshaped_boxes_tensor, sorted_scores,
-                              box_counts_tensor, max_size_per_class,
-                              iou_threshold_val, score_threshold_val, true,
-                              per_class_outputs, &output_indices_ptr, 0, true));
+        context,
+        DoNMSBatchedGPU(context, reshaped_boxes_tensor, sorted_scores,
+                        box_counts_tensor, max_size_per_class,
+                        iou_threshold_val, score_threshold_val, true,
+                        per_class_outputs, &output_indices_ptr, 0, true));
     Tensor gathered_boxes_tensor;
     OP_REQUIRES_OK(
         context,
@@ -1381,7 +2077,7 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
         SortScores(context, batch_size, 1, max_size_per_class * num_classes,
                    &gathered_scores_tensor, &out_sort_indices_tensor,
                    &post_nms_sorted_scores, &post_nms_sorted_indices,
-                   &cub_temp_buffer, &merged_box_counts_tensor,true));
+                   &cub_temp_buffer, &merged_box_counts_tensor, true));
     Tensor* output_boxes_tensor = nullptr;
     OP_REQUIRES_OK(context, context->allocate_output(
                                 0, TensorShape({batch_size, total_output, 4}),
