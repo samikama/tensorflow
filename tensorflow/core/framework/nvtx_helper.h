@@ -1,7 +1,7 @@
 #ifndef TENSORFLOW_CORE_FRAMEWORK_NVTX_HELPER_H_
 #define TENSORFLOW_CORE_FRAMEWORK_NVTX_HELPER_H_
-#include "tensorflow/core/util/env_var.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/util/env_var.h"
 #ifdef GOOGLE_CUDA
 #include "third_party/gpus/cuda/include/nvtx3/nvToolsExt.h"
 #else
@@ -9,6 +9,7 @@ typedef int nvtxRangeId_t;
 #endif
 
 namespace tensorflow {
+namespace nvtx_helper {
 inline bool is_nvtx_on() {
   static bool enabled = []() {
     bool b;
@@ -50,17 +51,15 @@ inline nvtxRangeId_t StartNvtxRange(const char* record_msg,
   attrs.category = 0;
   return ::nvtxRangeStartEx(&attrs);
 }
-inline void EndNvtxRange(nvtxRangeId_t t){
-    ::nvtxRangeEnd(t);
-}
+inline void EndNvtxRange(nvtxRangeId_t t) { ::nvtxRangeEnd(t); }
 #else
 inline nvtxRangeId_t StartNvtxRange(const char* record_msg,
                                     const char* op_type) {
-                                        return nvtxRangeId_t(0);
-                                    }
-inline void EndNvtxRange(nvtxRangeId_t t){}
+  return nvtxRangeId_t(0);
+}
+inline void EndNvtxRange(nvtxRangeId_t t) {}
 
 #endif
-}
-
+}  // namespace nvtx_helper
+}  // namespace tensorflow
 #endif

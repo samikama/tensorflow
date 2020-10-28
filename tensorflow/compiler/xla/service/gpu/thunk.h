@@ -120,13 +120,13 @@ class Thunk {
   virtual Status ExecuteOnStream(const ExecuteParams& params) = 0;
   Status SysExecuteOnStream(const ExecuteParams& params) {
 #ifdef GOOGLE_CUDA
-    if (tensorflow::is_nvtx_on()) {
+    if (tensorflow::nvtx_helper::is_nvtx_on()) {
       auto kind_str = Kind2String(kind());
-      auto range = tensorflow::StartNvtxRange(
+      auto range = tensorflow::nvtx_helper::StartNvtxRange(
           absl::StrCat("XLA", "|", kind_str, ": ", profile_annotation()).c_str(),
           kind_str);
       auto st = ExecuteOnStream(params);
-      tensorflow::EndNvtxRange(range);
+      tensorflow::nvtx_helper::EndNvtxRange(range);
       return st;
     } else {
       return ExecuteOnStream(params);

@@ -208,13 +208,13 @@ string OpKernel::TraceString(const OpKernelContext& ctx, bool verbose) const {
 void AsyncOpKernel::Compute(OpKernelContext* context) {
   Notification n;
 #ifdef GOOGLE_CUDA
-  if (is_nvtx_on()) {
-    auto range = StartNvtxRange(
+  if (nvtx_helper::is_nvtx_on()) {
+    auto range = nvtx_helper::StartNvtxRange(
         strings::StrCat("(A!) ", type_string_view(), ": ", name_view()).c_str(),
         type_string().c_str());
     auto wrappedDone = [range, &n] {
       n.Notify();
-      EndNvtxRange(range);
+      nvtx_helper::EndNvtxRange(range);
     };
     ComputeAsync(context, wrappedDone);
   } else {

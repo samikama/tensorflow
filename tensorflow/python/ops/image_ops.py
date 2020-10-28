@@ -98,6 +98,7 @@ type and representation.
 *   `tf.image.draw_bounding_boxes`
 *   `tf.image.combined_non_max_suppression`
 *   `tf.image.generate_bounding_box_proposals`
+*   `tf.image.batched_box_proposals`
 *   `tf.image.non_max_suppression`
 *   `tf.image.non_max_suppression_overlaps`
 *   `tf.image.non_max_suppression_padded`

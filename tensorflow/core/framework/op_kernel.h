@@ -180,12 +180,12 @@ class OpKernel {
   virtual void Compute(OpKernelContext* context) = 0;
   void SysCompute(const std::string& device_type,OpKernelContext* context) {
 #ifdef GOOGLE_CUDA
-    if (is_nvtx_on()) {
-      auto range = StartNvtxRange(
+    if (nvtx_helper::is_nvtx_on()) {
+      auto range = nvtx_helper::StartNvtxRange(
           strings::StrCat(device_type.c_str(),"|",type_string_view(), ": ", name_view()).c_str(),
           type_string().c_str());
       Compute(context);
-      EndNvtxRange(range);
+      nvtx_helper::EndNvtxRange(range);
     } else {
       Compute(context);
     }
@@ -284,21 +284,21 @@ class AsyncOpKernel : public OpKernel {
   virtual void ComputeAsync(OpKernelContext* context, DoneCallback done) = 0;
   void SysComputeAsync(const std::string& device_type,OpKernelContext* context, DoneCallback done) {
 #ifdef GOOGLE_CUDA
-    if (is_nvtx_on()) {
+    if (nvtx_helper::is_nvtx_on()) {
       auto sync_name=strings::StrCat(device_type.c_str(),"|",type_string_view(), ": ", name_view());
-      auto sync_range = StartNvtxRange(
+      auto sync_range = nvtx_helper::StartNvtxRange(
           strings::StrCat("(S) ",sync_name).c_str(),
           type_string().c_str());
 
-      auto range = StartNvtxRange(
+      auto range = nvtx_helper::StartNvtxRange(
           strings::StrCat("(A) ",sync_name).c_str(),
           type_string().c_str());
       auto wrappedDone = [range, done] {
         done();
-        EndNvtxRange(range);
+        nvtx_helper::EndNvtxRange(range);
       };
       ComputeAsync(context, wrappedDone);
-      EndNvtxRange(sync_range);
+      nvtx_helper::EndNvtxRange(sync_range);
     } else {
       ComputeAsync(context, done);
     }
