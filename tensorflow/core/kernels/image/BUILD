@@ -103,6 +103,8 @@ cc_library(
         ":adjust_hue_op",
         ":adjust_saturation_op",
         ":attention_ops",
+        ":batched_non_max_suppression_op",
+        ":batched_box_proposals_op",
         ":colorspace_op",
         ":crop_and_resize_op",
         ":decode_image_op",
@@ -121,6 +123,7 @@ cc_library(
         ":resize_bicubic_op",
         ":resize_bilinear_op",
         ":resize_nearest_neighbor_op",
+        ":roi_align_op",
         ":sample_distorted_bounding_box_op",
         ":scale_and_translate_op",
     ],
@@ -182,6 +185,27 @@ tf_kernel_library(
     name = "attention_ops",
     prefix = "attention_ops",
     deps = IMAGE_DEPS,
+)
+
+tf_kernel_library(
+    name = "batched_box_proposals_op",
+    gpu_srcs = ["batched_box_proposals_op.cu.cc"],
+    #gpu_copts = ["--generate-line-info=true","--device-debug=true","--debug=true"],
+    deps = ["//tensorflow/core/kernels:gpu_prim_hdrs"] + if_cuda_or_rocm([
+        ":batched_non_max_suppression_op",
+    ]),
+)
+
+tf_kernel_library(
+    name = "batched_non_max_suppression_op",
+    hdrs = ["batched_non_max_suppression_op.h"],
+    gpu_srcs = [
+        "batched_non_max_suppression_op.cu.cc",
+        "batched_non_max_suppression_op.h",
+    ],
+    deps = IMAGE_DEPS + ["//tensorflow/core/kernels:gpu_prim_hdrs"] + ["//tensorflow/core/kernels:transpose_functor"] + [
+        "//tensorflow/core/kernels:conv_2d_gpu",
+    ],
 )
 
 tf_kernel_library(
@@ -297,6 +321,12 @@ tf_kernel_library(
 )
 
 tf_kernel_library(
+    name = "roi_align_op",
+    prefix = "roi_align_op",
+    deps = IMAGE_DEPS,
+)
+
+tf_kernel_library(
     name = "sample_distorted_bounding_box_op",
     prefix = "sample_distorted_bounding_box_op",
     deps = IMAGE_DEPS + ["//tensorflow/core/kernels:stateless_random_ops"],
@@ -365,6 +395,16 @@ tf_cuda_cc_test(
     srcs = ["adjust_contrast_op_benchmark_test.cc"],
     deps = [
         ":image",
+    ] + IMAGE_TEST_DEPS,
+)
+
+tf_cuda_cc_test(
+    name = "batched_non_max_suppression_op_gpu_test",
+    srcs = ["batched_non_max_suppression_op_gpu_test.cc"],
+    tags = tf_cuda_tests_tags() + ["no_cuda_on_cpu_tap"],
+    deps = [
+        ":image",
+        "@com_google_absl//absl/strings",
     ] + IMAGE_TEST_DEPS,
 )
 
