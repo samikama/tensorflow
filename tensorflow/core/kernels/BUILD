@@ -3008,6 +3008,7 @@ cc_library(
         ":adjust_hue_op",
         ":adjust_saturation_op",
         ":attention_ops",
+        ":batched_box_proposals_op",
         ":batched_non_max_suppression_op",
         ":colorspace_op",
         ":crop_and_resize_op",
@@ -3132,11 +3133,24 @@ tf_kernel_library(
 )
 
 tf_kernel_library(
+    name = "batched_box_proposals_op",
+    gpu_srcs = ["batched_box_proposals_op.cu.cc"],
+    gpu_copts = ["--generate-line-info=true","--device-debug=true","--debug=true"],
+    deps = [":gpu_prim_hdrs"] + if_cuda([
+        ":batched_non_max_suppression_op",
+    ]),
+)
+
+tf_kernel_library(
     name = "batched_non_max_suppression_op",
     hdrs = ["batched_non_max_suppression_op.h"],
-    gpu_srcs = ["batched_non_max_suppression_op.cu.cc","batched_non_max_suppression_op.h"],
-    deps = IMAGE_DEPS + ["//tensorflow/core/kernels:gpu_prim_hdrs"] + ["//tensorflow/core/kernels:transpose_functor"] +
-        ["//tensorflow/core/kernels:conv_2d_gpu"],
+    gpu_srcs = [
+        "batched_non_max_suppression_op.cu.cc",
+        "batched_non_max_suppression_op.h",
+    ],
+    deps = IMAGE_DEPS + ["//tensorflow/core/kernels:gpu_prim_hdrs"] + ["//tensorflow/core/kernels:transpose_functor"] + [
+        "//tensorflow/core/kernels:conv_2d_gpu",
+    ],
 )
 
 tf_kernel_library(
@@ -3362,7 +3376,6 @@ tf_cuda_cc_test(
     tags = tf_cuda_tests_tags() + ["no_cuda_on_cpu_tap"],
     deps = [
         ":image",
-        "@com_google_absl//absl/strings",
         ":ops_testutil",
         ":ops_util",
         "//tensorflow/core:core_cpu",
@@ -3371,6 +3384,7 @@ tf_cuda_cc_test(
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
+        "@com_google_absl//absl/strings",
     ],
 )
 

@@ -50,7 +50,7 @@ auto OpGradientInfoInit(const T &a) {
 
 absl::optional<tensorflow::gtl::FlatSet<int>> OpGradientUnusedInputIndices(
     const tensorflow::string &op_name) {
-  static std::array<OpIndexInfo, 349> a = {{
+  static std::array<OpIndexInfo, 352> a = {{
       {"Acosh"},
       {"AllToAll", 1, {0}},
       {"ApproximateEqual"},
@@ -74,6 +74,9 @@ absl::optional<tensorflow::gtl::FlatSet<int>> OpGradientUnusedInputIndices(
       {"BitwiseOr"},
       {"BitwiseXor"},
       {"BroadcastGradientArgs"},
+      {"BatchedBoxProposals"},
+      {"BatchedNonMaxSuppression"},
+      {"CombinedNonMaxSuppression"},
       {"CSRSparseMatrixToDense"},
       {"CTCBeamSearchDecoder"},
       {"CTCGreedyDecoder"},
@@ -412,7 +415,7 @@ absl::optional<tensorflow::gtl::FlatSet<int>> OpGradientUnusedInputIndices(
 
 absl::optional<tensorflow::gtl::FlatSet<int>> OpGradientUnusedOutputIndices(
     const tensorflow::string &op_name) {
-  static std::array<OpIndexInfo, 465> a = {{
+  static std::array<OpIndexInfo, 468> a = {{
       {"Abs"},
       {"AccumulateNV2"},
       {"Acos"},
@@ -457,6 +460,9 @@ absl::optional<tensorflow::gtl::FlatSet<int>> OpGradientUnusedOutputIndices(
       {"BitwiseXor"},
       {"BroadcastGradientArgs"},
       {"BroadcastTo"},
+      {"BatchedBoxProposals"},
+      {"BatchedNonMaxSuppression"},
+      {"CombinedNonMaxSuppression"},
       {"CSRSparseMatrixToDense"},
       {"CTCGreedyDecoder"},
       {"CTCLoss", 1, {0}},
