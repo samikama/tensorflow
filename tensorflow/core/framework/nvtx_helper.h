@@ -13,7 +13,7 @@ namespace nvtx_helper {
 inline bool is_nvtx_on() {
   static bool enabled = []() {
     bool b;
-    TF_CHECK_OK(ReadBoolFromEnvVar("ENABLE_NVTX_MARKERS", true, &b));
+    TF_CHECK_OK(ReadBoolFromEnvVar("ENABLE_NVTX_MARKERS", false, &b));
     return b;
   }();
   return enabled;
