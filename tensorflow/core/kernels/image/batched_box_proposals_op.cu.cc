@@ -23,7 +23,7 @@ limitations under the License.
 #include "tensorflow/core/framework/numeric_types.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor_types.h"
-#include "tensorflow/core/kernels/batched_non_max_suppression_op.h"
+#include "tensorflow/core/kernels/image/batched_non_max_suppression_op.h"
 #include "tensorflow/core/kernels/gpu_prim.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/platform/logging.h"
