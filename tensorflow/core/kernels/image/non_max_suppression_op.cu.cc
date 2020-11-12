@@ -176,7 +176,8 @@ __launch_bounds__(1024) __global__
     int offset = box * bit_mask_len;
     // update global mask with current box's mask
     for (int b : GpuGridRangeX(bit_mask_len)) {
-      local[b] &= ~bitmask[offset + b];
+      atomicAnd(local+b,~bitmask[offset+b]);
+      //local[b] &= ~bitmask[offset + b];
     }
     __syncthreads();
     if (accepted_boxes > max_boxes) break;
