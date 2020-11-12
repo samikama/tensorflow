@@ -1320,7 +1320,12 @@ REGISTER_OP("BatchedBoxProposals")
     .Input("min_size: float")
     .Output("rois: float")
     .Output("roi_probabilities: float")
+    .Output("level_rois: N * float")
+    .Output("level_scores: N * float")
+    .Attr("N: int = 1")
     .Attr("post_nms_topn: int = 300")
+    .Attr("debug: bool = false")
+    .Attr("use_legacy_offset:bool = false")
     .SetShapeFn([](InferenceContext* c) -> Status {
       // make sure input tensors have are correct rank
       ShapeHandle scores, images, bounding_boxes, anchors, entries_per_level,nms_threshold,
@@ -1347,6 +1352,17 @@ REGISTER_OP("BatchedBoxProposals")
           {c->Dim(scores, 0), post_nms_top_n});  // (N,post_nms_top_n)
       c->set_output(0, roi_shape);
       c->set_output(1, prob_shape);
+      bool debug=false;
+      TF_RETURN_IF_ERROR(c->GetAttr("debug", &debug));
+      
+      if(debug){
+        DimensionHandle n_levels=c->Dim(entries_per_level,0);
+        int num_levels=c->Value(n_levels);
+        for(int i=0;i<num_levels;++i){
+          c->set_output(i+2,roi_shape);//box at level
+          c->set_output(i+2+num_levels,prob_shape);//score at level
+        }
+      }
       return Status::OK();
     });
 

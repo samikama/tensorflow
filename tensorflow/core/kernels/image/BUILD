@@ -192,7 +192,7 @@ tf_kernel_library(
     gpu_srcs = ["batched_box_proposals_op.cu.cc"],
     #gpu_copts = ["--generate-line-info=true","--device-debug=true","--debug=true"],
     deps = ["//tensorflow/core/kernels:gpu_prim_hdrs"] + if_cuda_or_rocm([
-        ":batched_non_max_suppression_op",
+        ":batched_non_max_suppression_op_gpu",
     ]),
 )
 

@@ -404,7 +404,8 @@ class Buckets(object):
     self.buckets = buckets
 
   def __del__(self):
-    pywrap_tfe.TFE_MonitoringDeleteBuckets(self.buckets)
+    if pywrap_tfe:
+      pywrap_tfe.TFE_MonitoringDeleteBuckets(self.buckets)
 
 
 class ExponentialBuckets(Buckets):

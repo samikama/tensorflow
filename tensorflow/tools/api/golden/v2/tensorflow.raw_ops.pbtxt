@@ -433,6 +433,14 @@ tf_module {
     argspec: "args=[\'input\', \'block_shape\', \'crops\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
+    name: "BatchedBoxProposals"
+    argspec: "args=[\'scores\', \'bbox_deltas\', \'image_info\', \'anchors\', \'entries_per_level\', \'nms_threshold\', \'pre_nms_topn\', \'min_size\', \'post_nms_topn\', \'name\'], varargs=None, keywords=None, defaults=[\'300\', \'None\'], "
+  }
+  member_method {
+    name: "BatchedNonMaxSuppression"
+    argspec: "args=[\'boxes\', \'scores\', \'box_counts\', \'max_output_size\', \'iou_threshold\', \'score_threshold\', \'pad_to_max_output_size\', \'algorithm\', \'name\'], varargs=None, keywords=None, defaults=[\'False\', \'-1\', \'None\'], "
+  }
+  member_method {
     name: "BesselI0"
     argspec: "args=[\'x\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
@@ -3177,6 +3185,14 @@ tf_module {
     argspec: "args=[\'images\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
+    name: "ROIAlign"
+    argspec: "args=[\'input\', \'rois\', \'sampling_ratio\', \'spatial_scale\', \'min_level\', \'max_level\', \'canonical_scale\', \'canonical_level\', \'pooled_height\', \'pooled_width\', \'data_format\', \'name\'], varargs=None, keywords=None, defaults=[\'7\', \'7\', \'NHWC\', \'None\'], "
+  }
+  member_method {
+    name: "ROIAlignGrad"
+    argspec: "args=[\'grads\', \'input\', \'rois\', \'sampling_ratio\', \'spatial_scale\', \'min_level\', \'max_level\', \'canonical_scale\', \'canonical_level\', \'pooled_height\', \'pooled_width\', \'data_format\', \'name\'], varargs=None, keywords=None, defaults=[\'7\', \'7\', \'NHWC\', \'None\'], "
+  }
+  member_method {
     name: "RaggedBincount"
     argspec: "args=[\'splits\', \'values\', \'size\', \'weights\', \'binary_output\', \'name\'], varargs=None, keywords=None, defaults=[\'False\', \'None\'], "
   }
@@ -3187,14 +3203,6 @@ tf_module {
   member_method {
     name: "RaggedCross"
     argspec: "args=[\'ragged_values\', \'ragged_row_splits\', \'sparse_indices\', \'sparse_values\', \'sparse_shape\', \'dense_inputs\', \'input_order\', \'hashed_output\', \'num_buckets\', \'hash_key\', \'out_values_type\', \'out_row_splits_type\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
-  }
-  member_method {
-    name: "ROIAlign"
-    argspec: "args=[\'input\', \'rois\', \'sampling_ratio\', \'spatial_scale\', \'min_level\', \'max_level\', \'canonical_scale\', \'canonical_level\', \'pooled_height\', \'pooled_width\', \'name\'], varargs=None, keywords=None, defaults=[\'7\', \'7\', \'None\'], "
-  }
-  member_method {
-    name: "ROIAlignGrad"
-    argspec: "args=[\'grads\', \'input\', \'rois\', \'sampling_ratio\', \'spatial_scale\', \'min_level\', \'max_level\', \'canonical_scale\', \'canonical_level\', \'pooled_height\', \'pooled_width\', \'name\'], varargs=None, keywords=None, defaults=[\'7\', \'7\', \'None\'], "
   }
   member_method {
     name: "RaggedGather"

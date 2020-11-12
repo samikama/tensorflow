@@ -326,7 +326,7 @@ __global__ void nms_reduce_batched(const int* n_boxes_arr,
   unsigned long long* mask_block = mask_buf_sh + col_blocks;
   for (int i = tid; i < col_blocks; i += blockDim.x) {
     res_mask_sh[i] = 0;
-    for (int j = 0; j < 8 * sizeof(unsigned long long); j++) { // take 64 bytes
+    for (int j = 0; j < 8 * sizeof(unsigned long long); j++) {  // take 64 bytes
       if ((i * 64 + j) < n_boxes && (initial_pos_mask[i * 64 + j] == 0))
         res_mask_sh[i] |= 1ULL << j;
     }
@@ -560,10 +560,6 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
     const int nboxes_generated = nboxes_to_generate;
     const int roi_cols = box_dim;
 
-
-    if(false){
-      
-    }else{
     Tensor dev_image_prenms_boxes;
     Tensor dev_image_prenms_scores;
     Tensor dev_image_boxes_keep_list;
@@ -606,8 +602,8 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
 
     gpuEvent_t copy_done;
     gpuEventCreate(&copy_done);
-
     // Do  per-image nms
+
     for (int image_index = 0; image_index < num_images; ++image_index) {
       // reset output workspaces
       OP_REQUIRES_OK(context,
@@ -629,8 +625,8 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
       float* d_image_postnms_rois_probs =
           &d_postnms_rois_probs[image_index * post_nms_topn_];
 
-      // Moving valid boxes (ie the ones with d_boxes_keep_flags[ibox] == true)
-      // to the output tensors
+      // Moving valid boxes (ie the ones with d_boxes_keep_flags[ibox] ==
+      // true) to the output tensors
       TF_OP_REQUIRES_CUDA_SUCCESS(
           context, gpuprim::DeviceSelect::Flagged(
                        d_cub_temp_storage, cub_temp_storage_bytes,
@@ -655,9 +651,9 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
       OP_REQUIRES_OK(context, NmsGpu(d_image_prenms_boxes, prenms_nboxes,
                                      nms_threshold, d_image_boxes_keep_list,
                                      &nkeep, context, post_nms_topn_));
-      // All operations done after previous sort were keeping the relative order
-      // of the elements the elements are still sorted keep topN <=> truncate
-      // the array
+      // All operations done after previous sort were keeping the relative
+      // order of the elements the elements are still sorted keep topN <=>
+      // truncate the array
       const int postnms_nboxes = std::min(nkeep, post_nms_topn_);
       // Moving the out boxes to the output tensors,
       // adding the image_index dimension on the fly
@@ -673,7 +669,6 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
                           d_image_postnms_rois_probs));
       nrois_in_output += postnms_nboxes;
       TF_OP_REQUIRES_CUDA_SUCCESS(context, cudaGetLastError());
-    }
     }
   }
 
