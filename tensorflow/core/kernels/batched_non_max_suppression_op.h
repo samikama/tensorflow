@@ -20,6 +20,7 @@ Status DoNMSBatchedGPUJagged(
     const float iou_threshold_val, const float score_threshold,
     bool pad_to_max_output, int* num_saved_outputs, Tensor** output_indices,
     int kernel = 0, bool pre_sorted_inputs = false);
+namespace BNMS {
 template <typename Index>
 __device__ __forceinline__ void SelectHelper(const Index i_selected,
                                              const Index i_original) {}
@@ -30,7 +31,7 @@ __device__ __forceinline__ void SelectHelper(const Index i_selected,
                                              const T* original, T* selected,
                                              Args... args) {
   selected[i_selected] = original[i_original];
-  SelectHelper(i_selected, i_original, args...);
+  BNMS::SelectHelper(i_selected, i_original, args...);
 }
 
 // Batch version of IndexMultiSelect, num_elemets contains number of elements in
@@ -46,8 +47,8 @@ __global__ void BatchedIndexMultiSelect(const int* num_elements,
     int istride = input_strides[y];
     int ostride = output_strides[y];
     for (const int idx : GpuGridRangeX(num_elements[y])) {
-      SelectHelper(idx + ostride, istride + indices[idx + istride], original,
-                   selected, args...);
+      BNMS::SelectHelper(idx + ostride, istride + indices[idx + istride],
+                         original, selected, args...);
     }
   }
 }
@@ -107,16 +108,20 @@ std::string dumpDeviceTensor(const std::string& Name, const int* t,
   return oss.str();
 }
 inline void CheckKernel(OpKernelContext* ctx, const std::string& msg) {
-  auto d= ctx->eigen_gpu_device();
+  auto d = ctx->eigen_gpu_device();
   d.synchronize();
   auto err = cudaGetLastError();
   if (err != cudaSuccess) {
     LOG(FATAL) << "Kernel Failed!" << msg << " err=" << cudaGetErrorString(err);
-  }else{
-    LOG(INFO)<<"Pass "<<msg;
+  } else {
+    if (VLOG_IS_ON(3)) {
+      LOG(INFO) << "Pass " << msg;
+      // }else{
+      //   LOG(INFO)<<"VLog is off but pass "<<msg;
+    }
   }
 }
-
+}  // namespace BNMS
 }  // namespace tensorflow
 #endif
 #endif

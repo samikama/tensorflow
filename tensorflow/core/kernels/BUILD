@@ -3127,6 +3127,7 @@ tf_kernel_library(
 tf_kernel_library(
     name = "generate_box_proposals_op",
     gpu_srcs = ["generate_box_proposals_op.cu.cc"],
+    #gpu_copts = ["--generate-line-info","--device-debug","--debug"],
     deps = [":gpu_prim_hdrs"] + if_cuda([
         ":non_max_suppression_op_gpu",
     ]),
@@ -3135,9 +3136,9 @@ tf_kernel_library(
 tf_kernel_library(
     name = "batched_box_proposals_op",
     gpu_srcs = ["batched_box_proposals_op.cu.cc"],
-    gpu_copts = ["--generate-line-info=true","--device-debug=true","--debug=true"],
+    gpu_copts = []+select({"//tensorflow:debug":["-nvcc_options=generate-line-info","-nvcc_options=debug"],"//conditions:default":[]}),
     deps = [":gpu_prim_hdrs"] + if_cuda([
-        ":batched_non_max_suppression_op",
+        ":batched_non_max_suppression_op_gpu",
     ]),
 )
 
@@ -3148,6 +3149,7 @@ tf_kernel_library(
         "batched_non_max_suppression_op.cu.cc",
         "batched_non_max_suppression_op.h",
     ],
+    gpu_copts = []+select({"//tensorflow:debug":["-nvcc_options=generate-line-info","-nvcc_options=debug"],"//conditions:default":[]}),
     deps = IMAGE_DEPS + ["//tensorflow/core/kernels:gpu_prim_hdrs"] + ["//tensorflow/core/kernels:transpose_functor"] + [
         "//tensorflow/core/kernels:conv_2d_gpu",
     ],

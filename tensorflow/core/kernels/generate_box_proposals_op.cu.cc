@@ -57,7 +57,7 @@ constexpr int threadsPerBlock = 64;
 constexpr int block_size = sizeof(unsigned long long) * 8;
 constexpr int max_shmem_size = 49152;
 
-namespace {
+namespace GBBP {
 
 // Decode d_bbox_deltas with respect to anchors into absolute coordinates,
 // clipping if necessary.
@@ -344,7 +344,7 @@ __global__ void nms_reduce_batched(const int* n_boxes_arr,
   unsigned long long* mask_block = mask_buf_sh + col_blocks;
   for (int i = tid; i < col_blocks; i += blockDim.x) {
     res_mask_sh[i] = 0;
-    for (int j = 0; j < 8 * sizeof(unsigned long long); j++) { // take 64 bytes
+    for (int j = 0; j < 8 * sizeof(unsigned long long); j++) {  // take 64 bytes
       if ((i * 64 + j) < n_boxes && (initial_pos_mask[i * 64 + j] == 0))
         res_mask_sh[i] |= 1ULL << j;
     }
@@ -433,7 +433,7 @@ __global__ void nms_kernel_batched(const int* n_boxes_arr,
   }
 }
 
-}  // namespace
+}  // namespace GBBP
 
 class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
  public:
@@ -527,7 +527,7 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
         std::max(cub_sort_temp_storage_bytes, cub_select_temp_storage_bytes);
     OP_REQUIRES_OK(
         context,
-        AllocateGenerationTempTensors(
+        GBBP::AllocateGenerationTempTensors(
             context, &d_conv_layer_indexes, &d_image_offset, &d_cub_temp_buffer,
             &d_sorted_conv_layer_indexes, &dev_sorted_scores, &dev_boxes,
             &dev_boxes_keep_flags, num_images, conv_layer_nboxes,
@@ -537,7 +537,7 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
         GetCuda2DLaunchConfig(conv_layer_nboxes, num_images, d);
     // create box indices and offsets for each image on device
     OP_REQUIRES_OK(
-        context, GpuLaunchKernel(InitializeDataKernel, conf2d.block_count,
+        context, GpuLaunchKernel(GBBP::InitializeDataKernel, conf2d.block_count,
                                  conf2d.thread_per_block, 0, d.stream(), conf2d,
                                  d_image_offset.flat<int>().data(),
                                  d_conv_layer_indexes.flat<int>().data()));
@@ -564,7 +564,7 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
     OP_REQUIRES_OK(
         context,
         GpuLaunchKernel(
-            GeneratePreNMSUprightBoxesKernel, conf2d.block_count,
+            GBBP::GeneratePreNMSUprightBoxesKernel, conf2d.block_count,
             conf2d.thread_per_block, 0, d.stream(), conf2d,
             d_sorted_conv_layer_indexes.flat<int>().data(),
             reinterpret_cast<const float4*>(bbox_deltas.flat<float>().data()),
@@ -577,10 +577,6 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
     const int nboxes_generated = nboxes_to_generate;
     const int roi_cols = box_dim;
 
-
-    if(false){
-      
-    }else{
     Tensor dev_image_prenms_boxes;
     Tensor dev_image_prenms_scores;
     Tensor dev_image_boxes_keep_list;
@@ -589,7 +585,7 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
     Tensor dev_prenms_nboxes;
     // Allocate workspaces needed for NMS
     OP_REQUIRES_OK(
-        context, AllocatePreNMSTempTensors(
+        context, GBBP::AllocatePreNMSTempTensors(
                      context, &dev_image_prenms_boxes, &dev_image_prenms_scores,
                      &dev_image_boxes_keep_list, &dev_postnms_rois,
                      &dev_postnms_rois_probs, &dev_prenms_nboxes, num_images,
@@ -628,7 +624,7 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
     for (int image_index = 0; image_index < num_images; ++image_index) {
       // reset output workspaces
       OP_REQUIRES_OK(context,
-                     ResetTensor<int32>(&dev_image_boxes_keep_list, d));
+                     GBBP::ResetTensor<int32>(&dev_image_boxes_keep_list, d));
       // Sub matrices for current image
       // boxes
       const float* d_image_boxes =
@@ -646,8 +642,8 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
       float* d_image_postnms_rois_probs =
           &d_postnms_rois_probs[image_index * post_nms_topn_];
 
-      // Moving valid boxes (ie the ones with d_boxes_keep_flags[ibox] == true)
-      // to the output tensors
+      // Moving valid boxes (ie the ones with d_boxes_keep_flags[ibox] ==
+      // true) to the output tensors
       TF_OP_REQUIRES_CUDA_SUCCESS(
           context, cub::DeviceSelect::Flagged(
                        d_cub_temp_storage, cub_temp_storage_bytes,
@@ -672,9 +668,9 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
       OP_REQUIRES_OK(context, NmsGpu(d_image_prenms_boxes, prenms_nboxes,
                                      nms_threshold, d_image_boxes_keep_list,
                                      &nkeep, context, post_nms_topn_));
-      // All operations done after previous sort were keeping the relative order
-      // of the elements the elements are still sorted keep topN <=> truncate
-      // the array
+      // All operations done after previous sort were keeping the relative
+      // order of the elements the elements are still sorted keep topN <=>
+      // truncate the array
       const int postnms_nboxes = std::min(nkeep, post_nms_topn_);
       // Moving the out boxes to the output tensors,
       // adding the image_index dimension on the fly
@@ -682,7 +678,7 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
       // make this single kernel
       OP_REQUIRES_OK(
           context,
-          GpuLaunchKernel(WriteUprightBoxesOutput, config.block_count,
+          GpuLaunchKernel(GBBP::WriteUprightBoxesOutput, config.block_count,
                           config.thread_per_block, 0, d.stream(), config,
                           reinterpret_cast<const float4*>(d_image_prenms_boxes),
                           d_image_prenms_scores, d_image_boxes_keep_list,
@@ -690,7 +686,6 @@ class GenerateBoundingBoxProposals : public tensorflow::OpKernel {
                           d_image_postnms_rois_probs));
       nrois_in_output += postnms_nboxes;
       TF_OP_REQUIRES_CUDA_SUCCESS(context, cudaGetLastError());
-    }
     }
   }
 

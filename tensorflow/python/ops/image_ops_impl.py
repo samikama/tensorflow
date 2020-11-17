@@ -3138,6 +3138,7 @@ def non_max_suppression_with_scores(boxes,
 
 
 @tf_export('image.batched_non_max_suppression')
+@dispatch.add_dispatch_support
 def batched_non_max_suppression(boxes,
                                scores,
                                box_counts,
@@ -3200,7 +3201,7 @@ def batched_non_max_suppression(boxes,
     iou_threshold = ops.convert_to_tensor(iou_threshold, name='iou_threshold')
     score_threshold = ops.convert_to_tensor(score_threshold,
                                             name='score_threshold')
-    algo_dict = {"auto":-1, "lb":0, "lf":1}
+    algo_dict = {"auto": -1, "lb": 0, "lf": 1}
     algo = -1
     if isinstance(algorithm, int):
       if algorithm < -1 or algorithm > 1:
@@ -5111,32 +5112,69 @@ def generate_bounding_box_proposals(scores,
       post_nms_topn=post_nms_topn,
       name=name)
 
+
 @tf_export('image.batched_box_proposals')
 @dispatch.add_dispatch_support
 def batched_box_proposals(scores,
-                                    bbox_deltas,
-                                    image_info,
-                                    anchors,
-                                    entries_per_level,
-                                    nms_threshold=0.7,
-                                    pre_nms_topn=6000,
-                                    min_size=16,
-                                    post_nms_topn=300,
-                                    name=None):
-  """Generate bounding box proposals from encoded bounding boxes.
+                          bbox_deltas,
+                          image_info,
+                          anchors,
+                          entries_per_level,
+                          nms_threshold=0.7,
+                          pre_nms_topn=6000,
+                          min_size=16,
+                          post_nms_topn=300,
+                          debug=False,
+                          use_legacy_offset=False,
+                          name=None):
+  """Generate bounding box proposals from encoded bounding boxes from all levels in single pass.
 
-  Returns:
-    rois: Region of interest boxes sorted by their scores.
-    roi_probabilities: scores of the ROI boxes in the ROIs' tensor.
-  """
-  return gen_image_ops.batched_box_proposals(
-      scores=scores,
-      bbox_deltas=bbox_deltas,
-      image_info=image_info,
-      anchors=anchors,
-      entries_per_level=entries_per_level,
-      nms_threshold=nms_threshold,
-      pre_nms_topn=pre_nms_topn,
-      min_size=min_size,
-      post_nms_topn=post_nms_topn,
-      name=name)
+    Args:
+      scores: A 4-D float `Tensor` of shape
+      `[batch, Sum(height * width)_{level}, num_achors]` containing scores of
+        the boxes for given anchors, can be unsorted. That is concatenated input scores for all levels
+        with flattened dimension in height and width.
+      bbox_deltas: A 4-D float `Tensor` of shape
+      `[batch, height * width, 4 x num_anchors]` encoding boxes 
+        with respect to each anchor. Coordinates are given 
+        in the form `[dy, dx, dh, dw]` concatenated for all levels.
+      image_info: A 2-D float `Tensor` of shape `[num_images, 5]` 
+        containing image information Height, Width, Scale.
+      anchors: A 2-D float `Tensor` of shape `[num_anchors, 4]` 
+        describing the anchor boxes.
+        Boxes are formatted in the form `[y1, x1, y2, x2]`.
+      entries_per_level: A 3-D integer `Tensor` with shape [batch,num_levels,1], containing the height*width value of each level
+      nms_threshold: A scalar float `Tensor` for non-maximal-suppression
+        threshold. Defaults to 0.7.
+      pre_nms_topn: A scalar int `Tensor` for the number of 
+        top scoring boxes to be used as input. Defaults to 6000.
+      min_size: A scalar float `Tensor`. Any box that has a smaller size
+        than min_size will be discarded. Defaults to 16.
+      post_nms_topn: An integer. Maximum number of rois in the output.
+      name: A name for this operation (optional).
+
+    Returns:
+      rois: Region of interest boxes sorted by their scores.
+      roi_probabilities: scores of the ROI boxes in the ROIs' tensor.
+    """
+  if debug:
+    N = entries_per_level.shape[0]
+  else:
+    N = 1
+  ret = gen_image_ops.batched_box_proposals(scores=scores,
+                                            bbox_deltas=bbox_deltas,
+                                            image_info=image_info,
+                                            anchors=anchors,
+                                            entries_per_level=entries_per_level,
+                                            nms_threshold=nms_threshold,
+                                            pre_nms_topn=pre_nms_topn,
+                                            min_size=min_size,
+                                            post_nms_topn=post_nms_topn,
+                                            debug=debug,
+                                            use_legacy_offset=use_legacy_offset,
+                                            N=N,
+                                            name=name)
+  if debug:
+    return ret
+  else:
+    return ret[0], ret[1]

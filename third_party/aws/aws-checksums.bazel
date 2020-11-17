@@ -18,6 +18,7 @@ cc_library(
         "source/intel/*.c",
         "source/*.c",
     ]),
+    copts = ["-O2"],
     hdrs = glob([
         "include/**/*.h"
     ]),

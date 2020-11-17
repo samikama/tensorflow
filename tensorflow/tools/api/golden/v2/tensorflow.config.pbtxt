@@ -41,6 +41,10 @@ tf_module {
     argspec: "args=[\'run_eagerly\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
+    name: "force_gpu_compatible"
+    argspec: "args=[\'enabled\'], varargs=None, keywords=None, defaults=None"
+  }
+  member_method {
     name: "functions_run_eagerly"
     argspec: "args=[], varargs=None, keywords=None, defaults=None"
   }
