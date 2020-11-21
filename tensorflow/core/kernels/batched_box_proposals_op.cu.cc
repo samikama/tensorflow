@@ -25,6 +25,7 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/kernels/batched_non_max_suppression_op.h"
 #include "tensorflow/core/kernels/gpu_prim.h"
+#include "tensorflow/core/kernels/gpu_type_helpers.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/stream_executor.h"
@@ -33,29 +34,44 @@ limitations under the License.
 #include "tensorflow/core/util/gpu_launch_config.h"
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 
-#define CHECK_KERNEL(x, y)   \
-  if (VLOG_IS_ON(2)) {       \
-    BNMS::CheckKernel(x, y); \
+#define CHECK_KERNEL(x, y)         \
+  if (VLOG_IS_ON(2)) {             \
+    BatchedNMS::CheckKernel(x, y); \
   }
 namespace tensorflow {
 typedef Eigen::GpuDevice GPUDevice;
 
 namespace BatchedBoxProps {
-template <bool with_offset>
-__device__ EIGEN_STRONG_INLINE float4 decode_box(const float4& anchor,
-                                                 const float4& deltas,
-                                                 const float BBOX_XFORM_CLIP);
+using namespace BatchedNMS;
+using namespace GpuTypeHelpers;
+
+template <typename T>
+__device__ EIGEN_STRONG_INLINE T get_lowest();
 template <>
-__device__ EIGEN_STRONG_INLINE float4 decode_box<true>(
-    const float4& anchor, const float4& deltas, const float BBOX_XFORM_CLIP) {
-  float anchor_xmin = anchor.y;
-  float anchor_xmax = anchor.w;
-  float anchor_ymin = anchor.x;
-  float anchor_ymax = anchor.z;
-  float dx = deltas.y;
-  float dy = deltas.x;
-  float dw = fmin(deltas.w, BBOX_XFORM_CLIP);
-  float dh = fmin(deltas.z, BBOX_XFORM_CLIP);
+__device__ EIGEN_STRONG_INLINE float get_lowest<float>() {
+  return std::numeric_limits<float>::lowest();
+};
+
+// Eigen std::numeric_limits<Eigen::half> is defined for cpu only
+template <>
+__device__ EIGEN_STRONG_INLINE Eigen::half get_lowest<Eigen::half>() {
+  return Eigen::half_impl::raw_uint16_to_half(0xfbff);
+};
+
+template <bool with_offset, typename T, typename U>
+__device__ EIGEN_STRONG_INLINE T decode_box(const T& anchor, const T& deltas,
+                                            const float BBOX_XFORM_CLIP);
+template <>
+__device__ EIGEN_STRONG_INLINE Box decode_box<true, Box, float>(
+    const Box& anchor, const Box& deltas, const float BBOX_XFORM_CLIP) {
+  float anchor_xmin = anchor.y1;
+  float anchor_xmax = anchor.y2;
+  float anchor_ymin = anchor.x1;
+  float anchor_ymax = anchor.x2;
+  float dx = deltas.y1;
+  float dy = deltas.x1;
+  float dw = fmin(deltas.y2, BBOX_XFORM_CLIP);
+  float dh = fmin(deltas.x2, BBOX_XFORM_CLIP);
 
   float anchor_h = anchor_ymax - anchor_ymin + 1.0;
   float anchor_w = anchor_xmax - anchor_xmin + 1.0;
@@ -76,16 +92,16 @@ __device__ EIGEN_STRONG_INLINE float4 decode_box<true>(
 }
 
 template <>
-__device__ EIGEN_STRONG_INLINE float4 decode_box<false>(
-    const float4& anchor, const float4& deltas, const float BBOX_XFORM_CLIP) {
-  const float anchor_xmin = anchor.y;
-  const float anchor_xmax = anchor.w;
-  const float anchor_ymin = anchor.x;
-  const float anchor_ymax = anchor.z;
-  const float dx = deltas.y;
-  const float dy = deltas.x;
-  const float dw = fmin(deltas.w, BBOX_XFORM_CLIP);
-  const float dh = fmin(deltas.z, BBOX_XFORM_CLIP);
+__device__ EIGEN_STRONG_INLINE Box decode_box<false, Box, float>(
+    const Box& anchor, const Box& deltas, const float BBOX_XFORM_CLIP) {
+  const float anchor_xmin = anchor.y1;
+  const float anchor_xmax = anchor.y2;
+  const float anchor_ymin = anchor.x1;
+  const float anchor_ymax = anchor.x2;
+  const float dx = deltas.y1;
+  const float dy = deltas.x1;
+  const float dw = fmin(deltas.y2, BBOX_XFORM_CLIP);
+  const float dh = fmin(deltas.x2, BBOX_XFORM_CLIP);
 
   const float anchor_h = anchor_ymax - anchor_ymin;
   const float anchor_w = anchor_xmax - anchor_xmin;
@@ -105,55 +121,154 @@ __device__ EIGEN_STRONG_INLINE float4 decode_box<false>(
           decoded_boxes_ymax};
 }
 
-template <bool>
-__device__ EIGEN_STRONG_INLINE void clip_legacy(float4& b, float width,
-                                                float height);
 template <>
-__device__ EIGEN_STRONG_INLINE void clip_legacy<true>(float4& decoded,
-                                                      float width,
-                                                      float height) {
-  decoded.x = fmax(fmin(decoded.x, width - 1.0), 0.0f);
-  decoded.y = fmax(fmin(decoded.y, height - 1.0), 0.0f);
-  decoded.z = fmax(fmin(decoded.z, width - 1.0), 0.0f);
-  decoded.w = fmax(fmin(decoded.w, height - 1.0), 0.0f);
+__device__ EIGEN_STRONG_INLINE HalfBox decode_box<true, HalfBox, Eigen::half>(
+    const HalfBox& anchor, const HalfBox& deltas, const float BBOX_XFORM_CLIP) {
+  float anchor_xmin = asType<float>(anchor.y1);
+  float anchor_xmax = asType<float>(anchor.y2);
+  float anchor_ymin = asType<float>(anchor.x1);
+  float anchor_ymax = asType<float>(anchor.x2);
+  float dx = asType<float>(deltas.y1);
+  float dy = asType<float>(deltas.x1);
+  float dw = min(asType<float>(deltas.y2), BBOX_XFORM_CLIP);
+  float dh = min(asType<float>(deltas.x2), BBOX_XFORM_CLIP);
+  float anchor_h = anchor_ymax - anchor_ymin + 1.0f;
+  float anchor_w = anchor_xmax - anchor_xmin + 1.0f;
+  float anchor_xc = anchor_xmin + 0.5f * anchor_w;
+  float anchor_yc = anchor_ymin + 0.5f * anchor_h;
+  float decoded_boxes_yc = dy * anchor_h + anchor_yc;
+  float decoded_boxes_xc = dx * anchor_w + anchor_xc;
+  float decoded_boxes_h = exp(dh) * anchor_h;
+  float decoded_boxes_w = exp(dw) * anchor_w;
+  float decoded_boxes_ymin =
+      decoded_boxes_yc - 0.5f * decoded_boxes_h;
+  float decoded_boxes_xmin =
+      decoded_boxes_xc - 0.5f * decoded_boxes_w;
+  float decoded_boxes_ymax =
+     decoded_boxes_ymin + decoded_boxes_h - 1.0f;
+  float decoded_boxes_xmax =
+      decoded_boxes_xmin + decoded_boxes_w - 1.0f;
+  return {asType<Eigen::half>(decoded_boxes_xmin), asType<Eigen::half>(decoded_boxes_ymin), asType<Eigen::half>(decoded_boxes_xmax),
+          asType<Eigen::half>(decoded_boxes_ymax)};
 }
 
 template <>
-__device__ EIGEN_STRONG_INLINE void clip_legacy<false>(float4& decoded,
-                                                       float width,
-                                                       float height) {
-  decoded.x = fmax(fmin(decoded.x, width), 0.0f);
-  decoded.y = fmax(fmin(decoded.y, height), 0.0f);
-  decoded.z = fmax(fmin(decoded.z, width), 0.0f);
-  decoded.w = fmax(fmin(decoded.w, height), 0.0f);
+__device__ EIGEN_STRONG_INLINE HalfBox decode_box<false, HalfBox, Eigen::half>(
+    const HalfBox& anchor, const HalfBox& deltas, const float BBOX_XFORM_CLIP) {
+  float anchor_xmin = asType<float>(anchor.y1);
+  float anchor_xmax = asType<float>(anchor.y2);
+  float anchor_ymin = asType<float>(anchor.x1);
+  float anchor_ymax = asType<float>(anchor.x2);
+  float dx = asType<float>(deltas.y1);
+  float dy = asType<float>(deltas.x1);
+  float dw = min(asType<float>(deltas.y2), BBOX_XFORM_CLIP);
+  float dh = min(asType<float>(deltas.x2), BBOX_XFORM_CLIP);
+  float anchor_h = anchor_ymax - anchor_ymin;
+  float anchor_w = anchor_xmax - anchor_xmin;
+  float anchor_xc = anchor_xmin + 0.5f * anchor_w;
+  float anchor_yc = anchor_ymin + 0.5f * anchor_h;
+  float decoded_boxes_yc = dy * anchor_h + anchor_yc;
+  float decoded_boxes_xc = dx * anchor_w + anchor_xc;
+  float decoded_boxes_h = exp(dh) * anchor_h;
+  float decoded_boxes_w = exp(dw) * anchor_w;
+
+  float decoded_boxes_ymin =
+      decoded_boxes_yc - 0.5f * decoded_boxes_h;
+  float decoded_boxes_xmin =
+      decoded_boxes_xc - 0.5f * decoded_boxes_w;
+  float decoded_boxes_ymax =
+      decoded_boxes_yc + 0.5f * decoded_boxes_h;
+  float decoded_boxes_xmax =
+      decoded_boxes_xc + 0.5f * decoded_boxes_w;
+  return {asType<Eigen::half>(decoded_boxes_xmin), asType<Eigen::half>(decoded_boxes_ymin), asType<Eigen::half>(decoded_boxes_xmax),
+          asType<Eigen::half>(decoded_boxes_ymax)};
 }
 
-template <bool>
-__device__ EIGEN_STRONG_INLINE bool keep_legacy(float4& b, float scale,
-                                                float min_size, float img_width,
-                                                float img_height);
+template <bool, typename B, typename T>
+__device__ EIGEN_STRONG_INLINE void clip_legacy(B& b, T width, T height);
 template <>
-__device__ EIGEN_STRONG_INLINE bool keep_legacy<true>(float4& b, float scale,
-                                                      float min_size,
-                                                      float img_width,
-                                                      float img_height) {
-  float h = b.w - b.y + 1.0;
-  float w = b.z - b.x + 1.0;
-  float xc = b.x + w / 2.0;
-  float yc = b.y + h / 2.0;
+__device__ EIGEN_STRONG_INLINE void clip_legacy<true, Box, float>(
+    Box& decoded, float width, float height) {
+  decoded.x1 = fmax(fmin(decoded.x1, width - 1.0), 0.0f);
+  decoded.y1 = fmax(fmin(decoded.y1, height - 1.0), 0.0f);
+  decoded.x2 = fmax(fmin(decoded.x2, width - 1.0), 0.0f);
+  decoded.y2 = fmax(fmin(decoded.y2, height - 1.0), 0.0f);
+}
+
+template <>
+__device__ EIGEN_STRONG_INLINE void clip_legacy<false, Box, float>(
+    Box& decoded, float width, float height) {
+  decoded.x1 = fmax(fmin(decoded.x1, width), 0.0f);
+  decoded.y1 = fmax(fmin(decoded.y1, height), 0.0f);
+  decoded.x2 = fmax(fmin(decoded.x2, width), 0.0f);
+  decoded.y2 = fmax(fmin(decoded.y2, height), 0.0f);
+}
+
+template <>
+__device__ EIGEN_STRONG_INLINE void clip_legacy<true, HalfBox, Eigen::half>(
+    HalfBox& decoded, Eigen::half width, Eigen::half height) {
+  decoded.x1 = max(min(decoded.x1, width - asType<Eigen::half>(1.0f)),
+                   asType<Eigen::half>(0.0f));
+  decoded.y1 = max(min(decoded.y1, height - asType<Eigen::half>(1.0f)),
+                   asType<Eigen::half>(0.0f));
+  decoded.x2 = max(min(decoded.x2, width - asType<Eigen::half>(1.0f)),
+                   asType<Eigen::half>(0.0f));
+  decoded.y2 = max(min(decoded.y2, height - asType<Eigen::half>(1.0f)),
+                   asType<Eigen::half>(0.0f));
+}
+
+template <>
+__device__ EIGEN_STRONG_INLINE void clip_legacy<false, HalfBox, Eigen::half>(
+    HalfBox& decoded, Eigen::half width, Eigen::half height) {
+  decoded.x1 = max(min(decoded.x1, width), asType<Eigen::half>(0.0f));
+  decoded.y1 = max(min(decoded.y1, height), asType<Eigen::half>(0.0f));
+  decoded.x2 = max(min(decoded.x2, width), asType<Eigen::half>(0.0f));
+  decoded.y2 = max(min(decoded.y2, height), asType<Eigen::half>(0.0f));
+}
+
+template <bool, typename B, typename T>
+__device__ EIGEN_STRONG_INLINE bool keep_legacy(B& b, T scale, T min_size,
+                                                T img_width, T img_height);
+template <>
+__device__ EIGEN_STRONG_INLINE bool keep_legacy<true, Box, float>(
+    Box& b, float scale, float min_size, float img_width, float img_height) {
+  float h = b.y2 - b.y1 + 1.0;
+  float w = b.x2 - b.x1 + 1.0;
+  float xc = b.x1 + w / 2.0;
+  float yc = b.y1 + h / 2.0;
   float min_scale = fmax(min_size, 1.0) * scale;
   return (fmin(h, w) >= min_scale) && (xc < img_width) && (yc < img_height);
 }
 
 template <>
-__device__ EIGEN_STRONG_INLINE bool keep_legacy<false>(float4& b, float scale,
-                                                       float min_size,
-                                                       float img_width,
-                                                       float img_height) {
+__device__ EIGEN_STRONG_INLINE bool keep_legacy<false, Box, float>(
+    Box& b, float scale, float min_size, float img_width, float img_height) {
   float min_scale = min_size * scale;
-  float h = b.w - b.y;
-  float w = b.z - b.x;
+  float h = b.y2 - b.y1;
+  float w = b.x2 - b.x1;
   return fmin(w, h) >= min_scale;
+}
+
+template <>
+__device__ EIGEN_STRONG_INLINE bool keep_legacy<true, HalfBox, Eigen::half>(
+    HalfBox& b, Eigen::half scale, Eigen::half min_size, Eigen::half img_width,
+    Eigen::half img_height) {
+  float h  = asType<float>(b.y2) - asType<float>(b.y1) + 1.0f;
+  float w  = asType<float>(b.x2) - asType<float>(b.x1) + 1.0f;
+  float xc = asType<float>(b.x1) + w / 2.0f;
+  float yc = asType<float>(b.y1) + h / 2.0f;
+  float min_scale = max(asType<float>(min_size), 1.0f) * asType<float>(scale);
+  return (min(h, w) >= min_scale) && (xc < img_width) && (yc < img_height);
+}
+
+template <>
+__device__ EIGEN_STRONG_INLINE bool keep_legacy<false, HalfBox, Eigen::half>(
+    HalfBox& b, Eigen::half scale, Eigen::half min_size, Eigen::half img_width,
+    Eigen::half img_height) {
+  float min_scale = asType<float>(min_size) * asType<float>(scale);
+  float h = asType<float>(b.y2) - asType<float>(b.y1);
+  float w = asType<float>(b.x2) - asType<float>(b.x1);
+  return min(w, h) >= min_scale;
 }
 // Decode d_bbox_deltas with respect to anchors into absolute coordinates,
 // clipping if necessary. Copy the boxes to new box array and new score array
@@ -162,14 +277,14 @@ __device__ EIGEN_STRONG_INLINE bool keep_legacy<false>(float4& b, float scale,
 // sigmoid, this will effectively crop them in nms layer min_size is the lower
 // bound of the shortest edge for the boxes to consider. bbox_xform_clip is the
 // upper bound of encoded width and height.
-template <bool use_legacy_offset>
+template <bool use_legacy_offset, typename B, typename T>
 __global__ void SelectAndGeneratePreNMSUprightBoxes(
-    const int batch_size, const float* d_original_scores,
-    const float4* d_bbox_deltas, const float4* d_anchors,
-    const int* argsort_indices, const int* layer_counts, const int num_layers,
-    const int num_anchors, int max_selection, const float min_size,
-    const float* d_img_info_vec,  // Input "image_info" to the op [N,5]
-    const float bbox_xform_clip, float4* d_out_boxes, float* d_out_scores) {
+    const int batch_size, const T* d_original_scores, const B* d_bbox_deltas,
+    const B* d_anchors, const int* argsort_indices, const int* layer_counts,
+    const int num_layers, const int num_anchors, int max_selection,
+    const T min_size,
+    const T* d_img_info_vec,  // Input "image_info" to the op [N,5]
+    const float bbox_xform_clip, B* d_out_boxes, T* d_out_scores) {
   // constants to calculate offsets in to the input and output arrays.
   int image_offset = 0;
   int out_offset = 0;
@@ -179,13 +294,13 @@ __global__ void SelectAndGeneratePreNMSUprightBoxes(
   }
 
   for (int image_index : GpuGridRangeY(batch_size)) {
-    const float4* curr_boxes = d_bbox_deltas + image_index * image_offset;
-    const float* curr_scores = d_original_scores + image_index * image_offset;
+    const B* curr_boxes = d_bbox_deltas + image_index * image_offset;
+    const T* curr_scores = d_original_scores + image_index * image_offset;
     /// All layer boxes are identical here so we will loop over all boxes
-    float4* image_out_boxes = d_out_boxes + image_index * out_offset;
-    float* image_out_scores = d_out_scores + image_index * out_offset;
+    B* image_out_boxes = d_out_boxes + image_index * out_offset;
+    T* image_out_scores = d_out_scores + image_index * out_offset;
     const int* curr_indices = argsort_indices + image_index * image_offset;
-    const float4* curr_anchors = d_anchors;  // anchors are per level
+    const B* curr_anchors = d_anchors;  // anchors are per level
     for (int level = 0; level < num_layers; ++level) {
       int num_select = min(max_selection, layer_counts[level]);
       for (int ibox : GpuGridRangeX(num_select)) {
@@ -208,13 +323,13 @@ __global__ void SelectAndGeneratePreNMSUprightBoxes(
         // x1,y1,x2,y2 :coordinates of anchor a, shifted for position (h,w)
         // maskrcnn_layout is y1,x1,y2,x2
         // this function returns the data in x1,x2,y1,y2 order
-        float4 decoded = BatchedBoxProps::decode_box<use_legacy_offset>(
+        B decoded = BatchedBoxProps::decode_box<use_legacy_offset,B,T>(
             curr_anchors[orig_index], curr_boxes[orig_index], bbox_xform_clip);
-        const float img_height = d_img_info_vec[5 * image_index + 0];
-        const float img_width = d_img_info_vec[5 * image_index + 1];
-        BatchedBoxProps::clip_legacy<use_legacy_offset>(decoded, img_width,
-                                                        img_height);
-        bool keep_box = BatchedBoxProps::keep_legacy<use_legacy_offset>(
+        const T img_height = d_img_info_vec[5 * image_index + 0];
+        const T img_width = d_img_info_vec[5 * image_index + 1];
+        BatchedBoxProps::clip_legacy<use_legacy_offset, B, T>(
+            decoded, img_width, img_height);
+        bool keep_box = BatchedBoxProps::keep_legacy<use_legacy_offset, B, T>(
             decoded, d_img_info_vec[5 * image_index + 2], min_size, img_width,
             img_height);
 
@@ -222,10 +337,22 @@ __global__ void SelectAndGeneratePreNMSUprightBoxes(
         // minsize elimination could be a problem since it may reduce the prenms
         // box count if a high scoring box is eliminated but not sure how much
         // that will effect the end result.
+        // if (threadIdx.x == 0) {
+        //   printf(
+        //       "x=%d y=%d bx=%d by=%d b=%d l=%d ns=%d cb=%p cs=%p ob=%p os=%p
+        //       " "ci =%p ca=%p i=%d oi =%d bx1=%6.3f by1=%6.3f bx2=%6.3f "
+        //       "by2=%6.3f\n",
+        //       threadIdx.x, threadIdx.y, blockIdx.x, blockIdx.y, image_index,
+        //       level, num_select, curr_boxes, curr_scores, image_out_boxes,
+        //       image_out_scores, curr_indices, curr_anchors, ibox,
+        //       curr_indices[ibox], decoded.x1, decoded.y1, decoded.x2,
+        //       decoded.y2);
+        // }
+
         if (keep_box) {
           image_out_scores[ibox] = curr_scores[ibox];
         } else {
-          image_out_scores[ibox] = std::numeric_limits<float>::lowest();
+          image_out_scores[ibox] = get_lowest<T>();
           printf("El %d %d\n", image_index, ibox);
         }
       }
@@ -252,9 +379,9 @@ __global__ void BatchedIndexGather(const int* num_elements,
     for (const int idx : GpuGridRangeX(num_elements[y])) {
       // printf("%d %d %d %d %d\n", y, idx, ostride, istride,
       //        indices[idx + ostride]);
-      BNMS::SelectHelper(idx + ostride,
-                         istride + indices[idx + y * index_offset], original,
-                         selected, args...);
+      BatchedNMS::SelectHelper(idx + ostride,
+                               istride + indices[idx + y * index_offset],
+                               original, selected, args...);
     }
   }
 }
@@ -300,29 +427,30 @@ __global__ void SetupSelectionIndices(const int* num_selected,
 }
 // Copy the selected boxes and scores to output tensors.
 //
+template <typename B, typename T>
 __global__ void CopyTopKtoOutput(const int batch_size, int* d_selected_counts,
                                  int* d_batch_offsets, int max_boxes,
-                                 const float4* d_boxes, const float* d_scores,
-                                 float4* d_output_boxes,
-                                 float* d_output_scores) {
+                                 const B* d_boxes, const T* d_scores,
+                                 B* d_output_boxes, T* d_output_scores) {
   for (int batch : GpuGridRangeY(batch_size)) {
-    const float* curr_scores = d_scores + d_batch_offsets[batch];
-    const float4* curr_boxes = d_boxes + d_batch_offsets[batch];
-    float* out_scores = d_output_scores + batch * max_boxes;
-    float4* out_boxes = d_output_boxes + batch * max_boxes;
+    const T* curr_scores = d_scores + d_batch_offsets[batch];
+    const B* curr_boxes = d_boxes + d_batch_offsets[batch];
+    T* out_scores = d_output_scores + batch * max_boxes;
+    B* out_boxes = d_output_boxes + batch * max_boxes;
     int num_selected_boxes = d_selected_counts[batch];
     for (int box : GpuGridRangeX(max_boxes)) {
       if (box < num_selected_boxes) {
         out_scores[box] = curr_scores[box];
         auto& ob = out_boxes[box];
         const auto& cb = curr_boxes[box];
-        ob.x = cb.y;
-        ob.y = cb.x;
-        ob.w = cb.z;
-        ob.z = cb.w;
+        ob.x1 = cb.y1;
+        ob.y1 = cb.x1;
+        ob.y2 = cb.x2;
+        ob.x2 = cb.y2;
       } else {
-        out_scores[box] = 0.0;
-        out_boxes[box] = {0., 0., 0., 0.};
+        out_scores[box] = asType<T>(0.0f);
+        out_boxes[box] = {asType<T>(0.0f), asType<T>(0.0f), asType<T>(0.0f),
+                          asType<T>(0.0f)};
       }
     }
   }
@@ -350,8 +478,13 @@ __device__ EIGEN_STRONG_INLINE T Reorder(const T& t) {
   return t;
 }
 template <>
-__device__ EIGEN_STRONG_INLINE float4 Reorder(const float4& t) {
-  return {t.y, t.x, t.w, t.z};
+__device__ EIGEN_STRONG_INLINE Box Reorder(const Box& t) {
+  return {t.y1, t.x1, t.y2, t.x2};
+}
+
+template <>
+__device__ EIGEN_STRONG_INLINE HalfBox Reorder(const HalfBox& t) {
+  return {t.y1, t.x1, t.y2, t.x2};
 }
 // this is inefficient but this is debug code so do not matter much
 template <typename T>
@@ -428,6 +561,438 @@ class Indexer {
   Tensor device_counts;
   Tensor host_counts;
 };
+template <typename B, typename T>
+Status BatchedBoxProposalsFunctor(
+    OpKernelContext* context, const Tensor& scores, const Tensor& bbox_deltas,
+    const Tensor& image_info, const Tensor& anchors,
+    const Tensor& num_entries_per_level, T nms_threshold, int pre_nms_topn,
+    T min_size, int post_nms_topn, float bbox_xform_clip_default,
+    bool debug = false, bool use_legacy_offset = false) {
+  int num_images = scores.dim_size(0);
+  int num_anchors = scores.dim_size(2);
+  int num_levels = num_entries_per_level.dim_size(0);
+  int box_dim = anchors.dim_size(1) / num_anchors;
+  auto d = context->eigen_gpu_device();
+  if (box_dim != 4) {
+    return errors::OutOfRange("Box dimensions need to be 4");
+  }
+
+  Tensor d_decoded_boxes, d_selected_boxes, d_filtered_scores,
+      d_selected_scores, d_layer_counts_tensor, d_output_indices_tensor,
+      h_layer_counts_tensor;
+
+  // layer_counts,start_offset,end_offset  +  3 x num_images for batch offset,
+  // batch end and batch counts
+  int indices_count = num_levels * num_images * 9 + 3 * num_images;
+  TF_RETURN_IF_ERROR(context->allocate_temp(DataType::DT_INT32,
+                                            TensorShape({indices_count}),
+                                            &d_layer_counts_tensor));
+  AllocatorAttributes alloc_attr;
+  alloc_attr.set_on_host(true);
+  alloc_attr.set_gpu_compatible(true);
+  TF_RETURN_IF_ERROR(
+      context->allocate_temp(DataType::DT_INT32, TensorShape({indices_count}),
+                             &h_layer_counts_tensor, alloc_attr));
+
+  const int32_t* nboxes_per_level =
+      num_entries_per_level.flat<int32_t>().data();
+
+  int prenms_per_image_count = 0;
+  for (int i = 0; i < num_levels; ++i) {
+    prenms_per_image_count +=
+        min(nboxes_per_level[i] * num_anchors, pre_nms_topn);
+  }
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      scores.dtype(), TensorShape({num_images, prenms_per_image_count}),
+      &d_filtered_scores));
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      scores.dtype(), d_filtered_scores.shape(), &d_selected_scores));
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      bbox_deltas.dtype(), TensorShape({num_images, prenms_per_image_count, 4}),
+      &d_decoded_boxes));
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      d_decoded_boxes.dtype(), d_decoded_boxes.shape(), &d_selected_boxes));
+
+  Tensor per_image_box_counts_tensor_h;
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      DataType::DT_INT32, TensorShape({num_images * num_levels}),
+      &per_image_box_counts_tensor_h, alloc_attr));
+
+  // make these a class!
+  int32_t* per_image_box_counts =
+      per_image_box_counts_tensor_h.flat<int32_t>().data();
+  std::vector<int32_t> box_counts_and_offsets(num_levels);
+  int* h_orig_layer_counts = h_layer_counts_tensor.flat<int>().data();
+  int* h_orig_layer_begin = h_orig_layer_counts + num_images * num_levels;
+  int* h_orig_layer_end = h_orig_layer_begin + num_images * num_levels;
+  int* h_prenms_layer_counts = h_orig_layer_end + num_images * num_levels;
+  int* h_prenms_layer_begin = h_prenms_layer_counts + num_images * num_levels;
+  int* h_prenms_layer_end = h_prenms_layer_begin + num_images * num_levels;
+  int* h_nms_io_counts = h_prenms_layer_end + num_images * num_levels;
+
+  int* d_layer_counts = d_layer_counts_tensor.flat<int>().data();
+  int total_num_boxes_per_level = 0;
+  int total_prenms_boxes = 0;
+  int global_offset = 0;
+  int prenms_offset = 0;
+  for (int batch = 0; batch < num_images; ++batch) {
+    for (int level = 0; level < num_levels; ++level) {
+      int boxes_in_level = nboxes_per_level[level] * num_anchors;
+      int prenms_box_count = min(boxes_in_level, pre_nms_topn);
+      // original offsets
+      h_orig_layer_counts[batch * num_levels + level] = boxes_in_level;
+      h_orig_layer_begin[batch * num_levels + level] = global_offset;
+      h_orig_layer_end[batch * num_levels + level] =
+          h_orig_layer_begin[batch * num_levels + level] + boxes_in_level;
+      global_offset += boxes_in_level;
+      // counts and offsets after prenms topn
+      h_prenms_layer_counts[batch * num_levels + level] = prenms_box_count;
+      h_prenms_layer_begin[batch * num_levels + level] = prenms_offset;
+      prenms_offset += prenms_box_count;
+      h_prenms_layer_end[batch * num_levels + level] =
+          h_prenms_layer_begin[batch * num_levels + level] + prenms_box_count;
+      // counts that will go in to nms
+      h_nms_io_counts[batch * num_levels + level] = prenms_box_count;
+      per_image_box_counts[batch * num_levels + level] = prenms_box_count;
+    }
+  }
+  for (int level = 0; level < num_levels; ++level) {
+    total_num_boxes_per_level += nboxes_per_level[level] * num_anchors;
+    total_prenms_boxes +=
+        min(nboxes_per_level[level] * num_anchors, pre_nms_topn);
+  }
+  Tensor OrigIndices, SortedIndices, SortedScores;
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      DataType::DT_INT32, TensorShape({num_images, total_num_boxes_per_level}),
+      &OrigIndices));
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      DataType::DT_INT32, OrigIndices.shape(), &SortedIndices));
+  TF_RETURN_IF_ERROR(
+      context->allocate_temp(scores.dtype(), scores.shape(), &SortedScores));
+
+  size_t cub_temp_storage_bytes = 0;
+  cudaError_t cuda_ret = cudaSuccess;
+  auto cuda_stream = GetGpuStream(context);
+  // CHECK_KERNEL(context, "BBP Before starting");
+  // Calling cub with nullptrs as inputs will make it return
+  // workspace size needed for the operation instead of doing the operation.
+  // In this specific instance, cub_sort_storage_bytes will contain the
+  // necessary workspace size for sorting after the call.
+  cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
+      nullptr, cub_temp_storage_bytes,
+      static_cast<typename BatchedNMS::ToCubType<T>::Type*>(
+          nullptr),  // selected scores
+      static_cast<typename BatchedNMS::ToCubType<T>::Type*>(
+          nullptr),                            // sorted scores
+      static_cast<int*>(nullptr),              // selected Boxes
+      static_cast<int*>(nullptr),              // sorted Boxes
+      total_num_boxes_per_level * num_images,  // Total number elements to sort
+      num_images * num_levels,  // number of independent segments to sort
+      static_cast<int*>(nullptr), static_cast<int*>(nullptr), 0,
+      8 * sizeof(typename ToCubType<T>::Type),  // sort all bits
+      cuda_stream);
+  if (cuda_ret != cudaSuccess) {
+    return errors::Internal(
+        "Topk sorting could not launch "
+        "gpuprim::DeviceSegmentedRadixSort::SortPairsDescending to sort "
+        "selected indices, "
+        "temp_storage_bytes: ",
+        cub_temp_storage_bytes, ", status: ", cudaGetErrorString(cuda_ret));
+    ;
+  }
+
+  Tensor d_cub_temp_buffer_tensor;
+  TF_RETURN_IF_ERROR(context->allocate_temp(
+      DataType::DT_INT8, TensorShape({(int64)cub_temp_storage_bytes}),
+      &d_cub_temp_buffer_tensor));
+  char* d_cub_buffer = (char*)d_cub_temp_buffer_tensor.flat<int8>().data();
+  int* d_orig_layer_counts = d_layer_counts_tensor.flat<int>().data();
+  int* d_orig_layer_offsets_begin =
+      d_orig_layer_counts + num_images * num_levels;
+  int* d_prenms_layer_counts =
+      d_orig_layer_counts + 3 * num_images * num_levels;
+  int* d_prenms_layer_offsets_begin =
+      d_prenms_layer_counts + num_images * num_levels;
+  int* d_nms_io_counts = d_orig_layer_counts + 6 * num_images * num_levels;
+  d.memcpyHostToDevice(d_layer_counts, h_orig_layer_counts,
+                       h_layer_counts_tensor.NumElements() * sizeof(int32_t));
+  auto conf2d = GetGpu2DLaunchConfig(total_num_boxes_per_level, num_images, d);
+  // Sort the scores so that we can apply prenms selection afterwards in
+  // SelectAndGeneratePreNMSUprightBoxes
+  int* original_indices = OrigIndices.flat<int>().data();
+  int* prenms_sorted_indices = SortedIndices.flat<int>().data();
+  TF_RETURN_IF_ERROR(
+      GpuLaunchKernel(BatchedBoxProps::GenerateIndices, conf2d.block_count,
+                      conf2d.thread_per_block, 0, d.stream(), num_images,
+                      num_levels, d_layer_counts, original_indices));
+  // CHECK_KERNEL(context, "BBP Index Generation");
+  cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
+      d_cub_buffer, cub_temp_storage_bytes,
+      reinterpret_cast<const typename ToCubType<T>::Type*>(
+          scores.flat<T>().data()),  // selected scores
+      reinterpret_cast<typename ToCubType<T>::Type*>(
+          SortedScores.flat<T>().data()),      // sorted scores
+      original_indices,                        // initial indices
+      prenms_sorted_indices,                   // sorted indices
+      total_num_boxes_per_level * num_images,  // Total number of boxes in batch
+      num_images * num_levels,  // num segments, since we are doing topK on
+                                // all levels, it is per image now
+      d_orig_layer_offsets_begin,
+      d_orig_layer_offsets_begin + num_images * num_levels, 0,
+      8 * sizeof(typename ToCubType<T>::Type),  // sort all bits
+      cuda_stream);
+  if (cuda_ret != cudaSuccess) {
+    return errors::Internal(
+        "Topk sorting could not launch "
+        "gpuprim::DeviceSegmentedRadixSort::SortPairsDescending to sort "
+        "selected indices, "
+        "temp_storage_bytes: ",
+        cub_temp_storage_bytes, ", status: ", cudaGetErrorString(cuda_ret));
+  }
+  // CHECK_KERNEL(context, "BBP Prenms sort");
+  if (use_legacy_offset) {
+    TF_RETURN_IF_ERROR(
+
+        GpuLaunchKernel(
+            BatchedBoxProps::SelectAndGeneratePreNMSUprightBoxes<true, B, T>,
+            conf2d.block_count, conf2d.thread_per_block, 0, d.stream(),
+            num_images, SortedScores.flat<T>().data(),
+            reinterpret_cast<const B*>(bbox_deltas.flat<T>().data()),
+            reinterpret_cast<const B*>(anchors.flat<T>().data()),
+            prenms_sorted_indices, d_layer_counts, num_levels, num_anchors,
+            pre_nms_topn, min_size, image_info.flat<T>().data(),
+            bbox_xform_clip_default,
+            reinterpret_cast<B*>(d_decoded_boxes.flat<T>().data()),
+            d_filtered_scores.flat<T>().data()));
+  } else {
+    TF_RETURN_IF_ERROR(
+
+        GpuLaunchKernel(
+            BatchedBoxProps::SelectAndGeneratePreNMSUprightBoxes<false, B, T>,
+            conf2d.block_count, conf2d.thread_per_block, 0, d.stream(),
+            num_images, SortedScores.flat<T>().data(),
+            reinterpret_cast<const B*>(bbox_deltas.flat<T>().data()),
+            reinterpret_cast<const B*>(anchors.flat<T>().data()),
+            prenms_sorted_indices, d_layer_counts, num_levels, num_anchors,
+            pre_nms_topn, min_size, image_info.flat<T>().data(),
+            bbox_xform_clip_default,
+            reinterpret_cast<B*>(d_decoded_boxes.flat<T>().data()),
+            d_filtered_scores.flat<T>().data()));
+  }
+  // CHECK_KERNEL(context, "SelectAndGeneratePeNMS");
+  Tensor* d_output_indices = &d_output_indices_tensor;
+  TF_RETURN_IF_ERROR(DoNMSBatchedGPUJagged(
+      context, d_decoded_boxes, d_filtered_scores,
+      per_image_box_counts_tensor_h, post_nms_topn, nms_threshold,
+      GpuTypeHelpers::asType<T>(-10000.f),
+      /*pad_to_max_output=*/true, d_nms_io_counts, &d_output_indices,
+      /*kernel=*/0, /*pre_sorted_input=*/true));
+  // CHECK_KERNEL(context, "DoNMSBatchedGPUJagged");
+  if (VLOG_IS_ON(3)) {
+    LOG(INFO) << BatchedNMS::dumpDeviceTensor<int>(
+        "layer counts After DoNMS", d_layer_counts_tensor, context);
+  }
+  int* d_nms_layer_offsets_begin = d_nms_io_counts + num_images * num_levels;
+  int* d_nms_layer_offsets_end =
+      d_nms_layer_offsets_begin + num_images * num_levels;
+
+  conf2d = GetGpu2DLaunchConfig(num_levels, num_images, d);
+  TF_RETURN_IF_ERROR(GpuLaunchKernel(
+      BatchedBoxProps::SetupSelectionIndices, conf2d.block_count,
+      conf2d.thread_per_block, 0, d.stream(), d_nms_io_counts, num_images,
+      num_levels, d_nms_layer_offsets_begin));
+  // CHECK_KERNEL(context, "BBP Setup Selection indices");
+  conf2d = GetGpu2DLaunchConfig(num_levels * post_nms_topn, num_images, d);
+  if (VLOG_IS_ON(3)) {
+    LOG(INFO) << BatchedNMS::dumpDeviceTensor<int>(
+        "SetupSelectionIndices", d_layer_counts_tensor, context);
+  }  // select the boxes and scores using nms result from nms inputs!
+  if (VLOG_IS_ON(5)) {
+    LOG(INFO) << BatchedNMS::dumpDeviceTensor<int>(
+        "NMSSelected", d_output_indices_tensor, context);
+  }
+  // VLOG(1)<<"Sorted scores
+  // address="<<(void*)SortedScores.flat<float>().data()<<" shape
+  // "<<SortedScores.shape()
+  // <<" Filtered_scores="<<(void*)d_filtered_scores.flat<float>().data()<<"
+  // shape="<<d_filtered_scores.shape()
+  // <<" Decoded boxes="<<(void*)d_decoded_boxes.flat<float>().data()<<"
+  // shape="<<d_decoded_boxes.shape()
+  // <<" Selected boxes="<<(void*)d_selected_boxes.flat<float>().data()<<"
+  // shape="<<d_selected_boxes.shape();
+  TF_RETURN_IF_ERROR(
+
+      GpuLaunchKernel(
+          BatchedBoxProps::BatchedIndexGather<int, B, const T*, T*>,
+          conf2d.block_count, conf2d.thread_per_block, 0, d.stream(),
+          /*entry_counts*/ d_nms_io_counts,
+          /*input offsets*/ d_prenms_layer_offsets_begin,
+          /*output offsets*/ d_nms_layer_offsets_begin,
+          /*batch size*/ num_levels * num_images,
+          /* index_offset*/ post_nms_topn,
+          /*selection index*/ d_output_indices->flat<int>().data(),
+          /*original source*/
+          reinterpret_cast<const B*>(d_decoded_boxes.flat<T>().data()),
+          /*destination*/
+          reinterpret_cast<B*>(d_selected_boxes.flat<T>().data()),
+          /*original*/ d_filtered_scores.flat<T>().data(),
+          /*destination*/
+          SortedScores.flat<T>().data()));  // reuse
+                                            // sorted_scores
+                                            // array to
+                                            // save space.
+  // CHECK_KERNEL(context, "PostNMS Box gathering");
+  if (VLOG_IS_ON(3)) {
+    LOG(INFO) << BatchedNMS::dumpDeviceTensor<int>(
+        "BNMSOutput output d_layer_counts_tensor", d_layer_counts_tensor,
+        context);
+  }
+  // TopK
+  if (debug) {
+    std::vector<Tensor*> debug_outputs(2 * num_levels, nullptr);
+    std::vector<T*> h_deb_score_ptrs(num_levels, nullptr);
+    std::vector<B*> h_deb_box_ptrs(num_levels, nullptr);
+    for (int i = 0; i < num_levels; ++i) {
+      TF_RETURN_IF_ERROR(context->allocate_output(
+          i + 2, TensorShape({num_images, post_nms_topn, 4}),
+          &debug_outputs[i]));
+      h_deb_box_ptrs[i] =
+          reinterpret_cast<B*>(debug_outputs[i]->template flat<T>().data());
+      TF_RETURN_IF_ERROR(context->allocate_output(
+          i + 2 + num_levels, TensorShape({num_images, post_nms_topn}),
+          &debug_outputs[i + num_levels]));
+      h_deb_score_ptrs[i] =
+          debug_outputs[i + num_levels]->template flat<T>().data();
+      VLOG(2) << "Output level " << i << " box " << (void*)h_deb_box_ptrs[i]
+              << " scores= " << (void*)h_deb_score_ptrs[i];
+    }
+    Tensor d_deb_box_ptrs, d_deb_score_ptrs;
+    TF_RETURN_IF_ERROR(context->allocate_temp(
+        DataType::DT_INT8,
+        TensorShape({num_images * num_levels * int(sizeof(B*))}),
+        &d_deb_box_ptrs));
+    TF_RETURN_IF_ERROR(context->allocate_temp(
+        DataType::DT_INT8,
+        TensorShape({num_images * num_levels * int(sizeof(T*))}),
+        &d_deb_score_ptrs));
+    void* d_dbox_ptrs =
+        reinterpret_cast<void*>(d_deb_box_ptrs.flat<int8>().data());
+    void* d_dscore_ptrs =
+        reinterpret_cast<void*>(d_deb_score_ptrs.flat<int8>().data());
+    d.memcpyHostToDevice(d_dbox_ptrs, h_deb_box_ptrs.data(),
+                         h_deb_box_ptrs.size() * sizeof(B*));
+    d.memcpyHostToDevice(d_dscore_ptrs, h_deb_score_ptrs.data(),
+                         h_deb_score_ptrs.size() * sizeof(T*));
+    d.synchronize();
+    auto conf2deb = GetGpu2DLaunchConfig(num_levels, num_images, d);
+
+    TF_RETURN_IF_ERROR(
+
+        GpuLaunchKernel(BatchedBoxProps::ScatterOutputs<B>,
+                        conf2deb.block_count, conf2deb.thread_per_block, 0,
+                        d.stream(),
+                        reinterpret_cast<B*>(d_selected_boxes.flat<T>().data()),
+                        d_nms_io_counts, num_images, num_levels, post_nms_topn,
+                        (void*)d_dbox_ptrs));
+    TF_RETURN_IF_ERROR(GpuLaunchKernel(
+        BatchedBoxProps::ScatterOutputs<T>, conf2deb.block_count,
+        conf2deb.thread_per_block, 0, d.stream(),
+        reinterpret_cast<T*>(SortedScores.flat<T>().data()), d_nms_io_counts,
+        num_images, num_levels, post_nms_topn, (void*)d_dscore_ptrs));
+    d.synchronize();
+  } else {
+    Tensor *dumm1, *dumm2;
+    TF_RETURN_IF_ERROR(context->allocate_output(2, TensorShape({}), &dumm1));
+    TF_RETURN_IF_ERROR(context->allocate_output(3, TensorShape({}), &dumm2));
+  }
+  size_t cub_output_tmp_size = 0;
+  // Calling cub with nullptrs as inputs will make it return
+  // workspace size needed for the operation instead of doing the operation.
+  // In this specific instance, cub_sort_storage_bytes will contain the
+  // necessary workspace size for sorting after the call.
+  cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
+      nullptr, cub_output_tmp_size,
+      static_cast<const typename ToCubType<T>::Type*>(
+          nullptr),                                        // selected scores
+      static_cast<typename ToCubType<T>::Type*>(nullptr),  // sorted scores
+      static_cast<B*>(nullptr),                            // selected Boxes
+      static_cast<B*>(nullptr),                            // sorted Boxes
+      d_output_indices->NumElements(),  // Total number of boxes in batch
+      num_images,  // num segments, since we are doing topK on all levels, it
+                   // is per image now
+      static_cast<int*>(nullptr), static_cast<int*>(nullptr), 0,
+      8 * sizeof(typename ToCubType<T>::Type),  // sort all bits
+      cuda_stream);
+  if (cuda_ret != cudaSuccess) {
+    return errors::Internal(
+        "Topk sorting could not launch "
+        "gpuprim::DeviceSegmentedRadixSort::SortPairsDescending to sort "
+        "selected indices, "
+        "temp_storage_bytes: ",
+        cub_temp_storage_bytes, ", status: ", cudaGetErrorString(cuda_ret));
+  }
+
+  if (cub_output_tmp_size > cub_temp_storage_bytes) {
+    TF_RETURN_IF_ERROR(context->allocate_temp(
+        DataType::DT_INT8, TensorShape({(int64)cub_output_tmp_size}),
+        &d_cub_temp_buffer_tensor));
+    d_cub_buffer = (char*)d_cub_temp_buffer_tensor.flat<int8>().data();
+    LOG(WARNING) << "Cub buffer was insufficent. Had to reallocate. Was "
+                 << cub_temp_storage_bytes << " needed " << cub_output_tmp_size;
+    cub_temp_storage_bytes = cub_output_tmp_size;
+  }
+  // reuse decoded_boxes buffer for sorted boxes
+  B* sorted_boxes = reinterpret_cast<B*>(d_decoded_boxes.flat<T>().data());
+  int* selected_batch_offsets = d_nms_io_counts + 3 * num_images * num_levels;
+  int* selected_batch_counts =
+      d_nms_io_counts + 3 * num_images * num_levels + 2 * num_images;
+  // sort all batches independently
+  cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
+      d_cub_buffer, cub_temp_storage_bytes,
+      reinterpret_cast<const typename ToCubType<T>::Type*>(
+          SortedScores.flat<T>().data()),  // nms selected scores
+      reinterpret_cast<typename ToCubType<T>::Type*>(
+          d_selected_scores.flat<T>().data()),  // final topk scores
+      reinterpret_cast<const B*>(
+          d_selected_boxes.flat<T>().data()),  // nms selected boxes
+      sorted_boxes,                            // final topk boxes
+      d_output_indices->NumElements(),         // Total number of boxes to sort
+      num_images,  // num segments, since we are doing topK on all levels,
+                   // it is per image now
+      selected_batch_offsets, selected_batch_offsets + num_images, 0,
+      8 * sizeof(typename ToCubType<T>::Type),  // sort all bits
+      cuda_stream);
+
+  if (cuda_ret != cudaSuccess) {
+    context->SetStatus(errors::Internal(
+        "Topk sorting could not launch "
+        "gpuprim::DeviceSegmentedRadixSort::SortPairsDescending to sort "
+        "selected indices, "
+        "temp_storage_bytes: ",
+        cub_temp_storage_bytes, ", status: ", cudaGetErrorString(cuda_ret)));
+    return Status::OK();
+  }
+  // CHECK_KERNEL(context, "BBP TopkSort");
+  Tensor* output_rois = nullptr;
+  Tensor* output_roi_probs = nullptr;
+  TF_RETURN_IF_ERROR(context->allocate_output(
+      0, TensorShape({num_images, post_nms_topn, 4}), &output_rois));
+  TF_RETURN_IF_ERROR(context->allocate_output(
+      1, TensorShape({num_images, post_nms_topn}), &output_roi_probs));
+  B* d_postnms_rois = reinterpret_cast<B*>((*output_rois).flat<T>().data());
+  T* d_postnms_rois_probs = (*output_roi_probs).flat<T>().data();
+  conf2d = GetGpu2DLaunchConfig(post_nms_topn, num_images, d);
+  TF_RETURN_IF_ERROR(
+
+      GpuLaunchKernel(BatchedBoxProps::CopyTopKtoOutput<B, T>,
+                      conf2d.block_count, conf2d.thread_per_block, 0,
+                      d.stream(), num_images, selected_batch_counts,
+                      selected_batch_offsets, post_nms_topn, sorted_boxes,
+                      d_selected_scores.flat<T>().data(), d_postnms_rois,
+                      d_postnms_rois_probs));
+  // CHECK_KERNEL(context, "CopyTopKtoOutput");
+  return Status::OK();
+}
 }  // namespace BatchedBoxProps
 
 class BatchedBoxProposals : public tensorflow::OpKernel {
@@ -465,477 +1030,52 @@ class BatchedBoxProposals : public tensorflow::OpKernel {
     const auto image_info = context->input(2);
     const auto anchors = context->input(3);
     const auto num_entries_per_level = context->input(4);
-    int num_images = scores.dim_size(0);
-    int num_anchors = scores.dim_size(2);
-    int num_levels = num_entries_per_level.dim_size(0);
-    int box_dim = anchors.dim_size(1) / num_anchors;
-    float nms_threshold;
     int pre_nms_topn;
-    float min_size;
-    OP_REQUIRES(context, box_dim == 4,
-                errors::OutOfRange("Box dimensions need to be 4"));
 
-    OP_REQUIRES_OK(context, GetScalarValue(context, 5, &nms_threshold));
-    if (nms_threshold < 0 || nms_threshold > 1.0) {
-      context->SetStatus(errors::InvalidArgument(
-          "nms_threshold should be between 0 and 1. Got ", nms_threshold));
-      return;
-    }
     OP_REQUIRES_OK(context, GetScalarValue(context, 6, &pre_nms_topn));
     if (pre_nms_topn <= 0) {
       context->SetStatus(errors::InvalidArgument(
           "pre_nms_topn should be greater than 0", pre_nms_topn));
       return;
     }
-    OP_REQUIRES_OK(context, GetScalarValue(context, 7, &min_size));
-    auto d = context->eigen_gpu_device();
-    Tensor d_decoded_boxes, d_selected_boxes, d_filtered_scores,
-        d_selected_scores, d_layer_counts_tensor, d_output_indices_tensor,
-        h_layer_counts_tensor;
-
-    // layer_counts,start_offset,end_offset  +  3 x num_images for batch offset,
-    // batch end and batch counts
-    int indices_count = num_levels * num_images * 9 + 3 * num_images;
-    OP_REQUIRES_OK(context, context->allocate_temp(DataType::DT_INT32,
-                                                   TensorShape({indices_count}),
-                                                   &d_layer_counts_tensor));
-    // OP_REQUIRES_OK(
-    //     context, context->allocate_temp(DataType::DT_INT32,
-    //                                     TensorShape({num_levels *
-    //                                     num_images}), d_output_indices));
-
-    AllocatorAttributes alloc_attr;
-    alloc_attr.set_on_host(true);
-    alloc_attr.set_gpu_compatible(true);
-    OP_REQUIRES_OK(
-        context,
-        context->allocate_temp(DataType::DT_INT32, TensorShape({indices_count}),
-                               &h_layer_counts_tensor, alloc_attr));
-
-    const int32_t* nboxes_per_level =
-        num_entries_per_level.flat<int32_t>().data();
-
-    int prenms_per_image_count = 0;
-    for (int i = 0; i < num_levels; ++i) {
-      prenms_per_image_count +=
-          min(nboxes_per_level[i] * num_anchors, pre_nms_topn);
-    }
-    OP_REQUIRES_OK(
-        context,
-        context->allocate_temp(
-            scores.dtype(), TensorShape({num_images, prenms_per_image_count}),
-            &d_filtered_scores));
-    OP_REQUIRES_OK(context, context->allocate_temp(scores.dtype(),
-                                                   d_filtered_scores.shape(),
-                                                   &d_selected_scores));
-    OP_REQUIRES_OK(context,
-                   context->allocate_temp(
-                       bbox_deltas.dtype(),
-                       TensorShape({num_images, prenms_per_image_count, 4}),
-                       &d_decoded_boxes));
-    OP_REQUIRES_OK(context, context->allocate_temp(d_decoded_boxes.dtype(),
-                                                   d_decoded_boxes.shape(),
-                                                   &d_selected_boxes));
-
-    Tensor per_image_box_counts_tensor_h;
-    OP_REQUIRES_OK(
-        context, context->allocate_temp(
-                     DataType::DT_INT32, TensorShape({num_images * num_levels}),
-                     &per_image_box_counts_tensor_h, alloc_attr));
-
-    // make these a class!
-    int32_t* per_image_box_counts =
-        per_image_box_counts_tensor_h.flat<int32_t>().data();
-    std::vector<int32_t> box_counts_and_offsets(num_levels);
-    int* h_orig_layer_counts = h_layer_counts_tensor.flat<int>().data();
-    int* h_orig_layer_begin = h_orig_layer_counts + num_images * num_levels;
-    int* h_orig_layer_end = h_orig_layer_begin + num_images * num_levels;
-    int* h_prenms_layer_counts = h_orig_layer_end + num_images * num_levels;
-    int* h_prenms_layer_begin = h_prenms_layer_counts + num_images * num_levels;
-    int* h_prenms_layer_end = h_prenms_layer_begin + num_images * num_levels;
-    int* h_nms_io_counts = h_prenms_layer_end + num_images * num_levels;
-
-    int* d_layer_counts = d_layer_counts_tensor.flat<int>().data();
-    int total_num_boxes_per_level = 0;
-    int total_prenms_boxes = 0;
-    int global_offset = 0;
-    int prenms_offset = 0;
-    for (int batch = 0; batch < num_images; ++batch) {
-      for (int level = 0; level < num_levels; ++level) {
-        int boxes_in_level = nboxes_per_level[level] * num_anchors;
-        int prenms_box_count = min(boxes_in_level, pre_nms_topn);
-        // original offsets
-        h_orig_layer_counts[batch * num_levels + level] = boxes_in_level;
-        h_orig_layer_begin[batch * num_levels + level] = global_offset;
-        h_orig_layer_end[batch * num_levels + level] =
-            h_orig_layer_begin[batch * num_levels + level] + boxes_in_level;
-        global_offset += boxes_in_level;
-        // counts and offsets after prenms topn
-        h_prenms_layer_counts[batch * num_levels + level] = prenms_box_count;
-        h_prenms_layer_begin[batch * num_levels + level] = prenms_offset;
-        prenms_offset += prenms_box_count;
-        h_prenms_layer_end[batch * num_levels + level] =
-            h_prenms_layer_begin[batch * num_levels + level] + prenms_box_count;
-        // counts that will go in to nms
-        h_nms_io_counts[batch * num_levels + level] = prenms_box_count;
-        per_image_box_counts[batch * num_levels + level] = prenms_box_count;
+    if (scores.dtype() == DataType::DT_FLOAT) {
+      float nms_threshold;
+      float min_size;
+      OP_REQUIRES_OK(context, GetScalarValue(context, 5, &nms_threshold));
+      if (nms_threshold < 0 || nms_threshold > 1.0) {
+        context->SetStatus(errors::InvalidArgument(
+            "nms_threshold should be between 0 and 1. Got ", nms_threshold));
+        return;
       }
-    }
-    for (int level = 0; level < num_levels; ++level) {
-      total_num_boxes_per_level += nboxes_per_level[level] * num_anchors;
-      total_prenms_boxes +=
-          min(nboxes_per_level[level] * num_anchors, pre_nms_topn);
-    }
-    Tensor OrigIndices, SortedIndices, SortedScores;
-    OP_REQUIRES_OK(context,
-                   context->allocate_temp(
-                       DataType::DT_INT32,
-                       TensorShape({num_images, total_num_boxes_per_level}),
-                       &OrigIndices));
-    OP_REQUIRES_OK(
-        context, context->allocate_temp(DataType::DT_INT32, OrigIndices.shape(),
-                                        &SortedIndices));
-    OP_REQUIRES_OK(context,
-                   context->allocate_temp(DataType::DT_FLOAT, scores.shape(),
-                                          &SortedScores));
-
-    size_t cub_temp_storage_bytes = 0;
-    cudaError_t cuda_ret = cudaSuccess;
-    auto cuda_stream = GetGpuStream(context);
-    //CHECK_KERNEL(context, "BBP Before starting");
-    // Calling cub with nullptrs as inputs will make it return
-    // workspace size needed for the operation instead of doing the operation.
-    // In this specific instance, cub_sort_storage_bytes will contain the
-    // necessary workspace size for sorting after the call.
-    cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
-        nullptr, cub_temp_storage_bytes,
-        static_cast<float*>(nullptr),  // selected scores
-        static_cast<float*>(nullptr),  // sorted scores
-        static_cast<int*>(nullptr),    // selected Boxes
-        static_cast<int*>(nullptr),    // sorted Boxes
-        total_num_boxes_per_level *
-            num_images,           // Total number elements to sort
-        num_images * num_levels,  // number of independent segments to sort
-        static_cast<int*>(nullptr), static_cast<int*>(nullptr), 0,
-        8 * sizeof(float),  // sort all bits
-        cuda_stream);
-    if (cuda_ret != cudaSuccess) {
-      context->SetStatus(errors::Internal(
-          "Topk sorting could not launch "
-          "gpuprim::DeviceSegmentedRadixSort::SortPairsDescending to sort "
-          "selected indices, "
-          "temp_storage_bytes: ",
-          cub_temp_storage_bytes, ", status: ", cudaGetErrorString(cuda_ret)));
-      return;
-    }
-
-    Tensor d_cub_temp_buffer_tensor;
-    OP_REQUIRES_OK(context, context->allocate_temp(
-                                DataType::DT_INT8,
-                                TensorShape({(int64)cub_temp_storage_bytes}),
-                                &d_cub_temp_buffer_tensor));
-    char* d_cub_buffer = (char*)d_cub_temp_buffer_tensor.flat<int8>().data();
-    int* d_orig_layer_counts = d_layer_counts_tensor.flat<int>().data();
-    int* d_orig_layer_offsets_begin =
-        d_orig_layer_counts + num_images * num_levels;
-    int* d_prenms_layer_counts =
-        d_orig_layer_counts + 3 * num_images * num_levels;
-    int* d_prenms_layer_offsets_begin =
-        d_prenms_layer_counts + num_images * num_levels;
-    int* d_nms_io_counts = d_orig_layer_counts + 6 * num_images * num_levels;
-    d.memcpyHostToDevice(d_layer_counts, h_orig_layer_counts,
-                         h_layer_counts_tensor.NumElements() * sizeof(int32_t));
-    auto conf2d =
-        GetGpu2DLaunchConfig(total_num_boxes_per_level, num_images, d);
-    // Sort the scores so that we can apply prenms selection afterwards in
-    // SelectAndGeneratePreNMSUprightBoxes
-    int* original_indices = OrigIndices.flat<int>().data();
-    int* prenms_sorted_indices = SortedIndices.flat<int>().data();
-    OP_REQUIRES_OK(
-        context,
-        GpuLaunchKernel(BatchedBoxProps::GenerateIndices, conf2d.block_count,
-                        conf2d.thread_per_block, 0, d.stream(), num_images,
-                        num_levels, d_layer_counts, original_indices));
-    //CHECK_KERNEL(context, "BBP Index Generation");
-    cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
-        d_cub_buffer, cub_temp_storage_bytes,
-        scores.flat<float>().data(),        // selected scores
-        SortedScores.flat<float>().data(),  // sorted scores
-        original_indices,                   // initial indices
-        prenms_sorted_indices,              // sorted indices
-        total_num_boxes_per_level *
-            num_images,           // Total number of boxes in batch
-        num_images * num_levels,  // num segments, since we are doing topK on
-                                  // all levels, it is per image now
-        d_orig_layer_offsets_begin,
-        d_orig_layer_offsets_begin + num_images * num_levels, 0,
-        8 * sizeof(float),  // sort all bits
-        cuda_stream);
-    if (cuda_ret != cudaSuccess) {
-      context->SetStatus(errors::Internal(
-          "Topk sorting could not launch "
-          "gpuprim::DeviceSegmentedRadixSort::SortPairsDescending to sort "
-          "selected indices, "
-          "temp_storage_bytes: ",
-          cub_temp_storage_bytes, ", status: ", cudaGetErrorString(cuda_ret)));
-      return;
-    }
-    //CHECK_KERNEL(context, "BBP Prenms sort");
-    if (use_legacy_offset_) {
-      OP_REQUIRES_OK(
-          context,
-          GpuLaunchKernel(
-              BatchedBoxProps::SelectAndGeneratePreNMSUprightBoxes<true>,
-              conf2d.block_count, conf2d.thread_per_block, 0, d.stream(),
-              num_images, SortedScores.flat<float>().data(),
-              reinterpret_cast<const float4*>(bbox_deltas.flat<float>().data()),
-              reinterpret_cast<const float4*>(anchors.flat<float>().data()),
-              prenms_sorted_indices, d_layer_counts, num_levels, num_anchors,
-              pre_nms_topn, min_size, image_info.flat<float>().data(),
-              bbox_xform_clip_default_,
-              reinterpret_cast<float4*>(d_decoded_boxes.flat<float>().data()),
-              d_filtered_scores.flat<float>().data()));
+      OP_REQUIRES_OK(context, GetScalarValue(context, 7, &min_size));
+      auto status =
+          BatchedBoxProps::BatchedBoxProposalsFunctor<BatchedNMS::Box, float>(
+              context, scores, bbox_deltas, image_info, anchors,
+              num_entries_per_level, nms_threshold, pre_nms_topn, min_size,
+              post_nms_topn_, bbox_xform_clip_default_, debug_,
+              use_legacy_offset_);
+      if (!status.ok()) context->SetStatus(status);
     } else {
-      OP_REQUIRES_OK(
-          context,
-          GpuLaunchKernel(
-              BatchedBoxProps::SelectAndGeneratePreNMSUprightBoxes<false>,
-              conf2d.block_count, conf2d.thread_per_block, 0, d.stream(),
-              num_images, SortedScores.flat<float>().data(),
-              reinterpret_cast<const float4*>(bbox_deltas.flat<float>().data()),
-              reinterpret_cast<const float4*>(anchors.flat<float>().data()),
-              prenms_sorted_indices, d_layer_counts, num_levels, num_anchors,
-              pre_nms_topn, min_size, image_info.flat<float>().data(),
-              bbox_xform_clip_default_,
-              reinterpret_cast<float4*>(d_decoded_boxes.flat<float>().data()),
-              d_filtered_scores.flat<float>().data()));
-    }
-    //CHECK_KERNEL(context, "SelectAndGeneratePeNMS");
-    Tensor* d_output_indices = &d_output_indices_tensor;
-    OP_REQUIRES_OK(context, DoNMSBatchedGPUJagged(
-                                context, d_decoded_boxes, d_filtered_scores,
-                                per_image_box_counts_tensor_h, post_nms_topn_,
-                                nms_threshold, -10000., true, d_nms_io_counts,
-                                &d_output_indices, 0, true));
-    //CHECK_KERNEL(context, "DoNMSBatchedGPUJagged");
-    if (VLOG_IS_ON(3)) {
-      LOG(INFO) << BNMS::dumpDeviceTensor<int>("layer counts After DoNMS",
-                                               d_layer_counts_tensor, context);
-    }
-    int* d_nms_layer_offsets_begin = d_nms_io_counts + num_images * num_levels;
-    int* d_nms_layer_offsets_end =
-        d_nms_layer_offsets_begin + num_images * num_levels;
-
-    conf2d = GetGpu2DLaunchConfig(num_levels, num_images, d);
-    OP_REQUIRES_OK(
-        context, GpuLaunchKernel(BatchedBoxProps::SetupSelectionIndices,
-                                 conf2d.block_count, conf2d.thread_per_block, 0,
-                                 d.stream(), d_nms_io_counts, num_images,
-                                 num_levels, d_nms_layer_offsets_begin));
-    //CHECK_KERNEL(context, "BBP Setup Selection indices");
-    conf2d = GetGpu2DLaunchConfig(num_levels * post_nms_topn_, num_images, d);
-    if (VLOG_IS_ON(3)) {
-      LOG(INFO) << BNMS::dumpDeviceTensor<int>("SetupSelectionIndices",
-                                               d_layer_counts_tensor, context);
-    }  // select the boxes and scores using nms result from nms inputs!
-    if (VLOG_IS_ON(5)) {
-      LOG(INFO) << BNMS::dumpDeviceTensor<int>(
-          "NMSSelected", d_output_indices_tensor, context);
-    }
-    // VLOG(1)<<"Sorted scores
-    // address="<<(void*)SortedScores.flat<float>().data()<<" shape
-    // "<<SortedScores.shape()
-    // <<" Filtered_scores="<<(void*)d_filtered_scores.flat<float>().data()<<"
-    // shape="<<d_filtered_scores.shape()
-    // <<" Decoded boxes="<<(void*)d_decoded_boxes.flat<float>().data()<<"
-    // shape="<<d_decoded_boxes.shape()
-    // <<" Selected boxes="<<(void*)d_selected_boxes.flat<float>().data()<<"
-    // shape="<<d_selected_boxes.shape();
-    OP_REQUIRES_OK(
-        context,
-        GpuLaunchKernel(
-            BatchedBoxProps::BatchedIndexGather<int, float4, const float*,
-                                                float*>,
-            conf2d.block_count, conf2d.thread_per_block, 0, d.stream(),
-            /*entry_counts*/ d_nms_io_counts,
-            /*input offsets*/ d_prenms_layer_offsets_begin,
-            /*output offsets*/ d_nms_layer_offsets_begin,
-            /*batch size*/ num_levels * num_images,
-            /* index_offset*/ post_nms_topn_,
-            /*selection index*/ d_output_indices->flat<int>().data(),
-            /*original source*/
-            reinterpret_cast<const float4*>(
-                d_decoded_boxes.flat<float>().data()),
-            /*destination*/
-            reinterpret_cast<float4*>(d_selected_boxes.flat<float>().data()),
-            /*original*/ d_filtered_scores.flat<float>().data(),
-            /*destination*/
-            SortedScores.flat<float>().data()));  // reuse
-                                                  // sorted_scores
-                                                  // array to
-                                                  // save space.
-    //CHECK_KERNEL(context, "PostNMS Box gathering");
-    if (VLOG_IS_ON(3)) {
-      LOG(INFO) << BNMS::dumpDeviceTensor<int>(
-          "BNMSOutput output d_layer_counts_tensor", d_layer_counts_tensor,
-          context);
-    }
-    // TopK
-    if (debug_) {
-      std::vector<Tensor*> debug_outputs(2 * num_levels, nullptr);
-      std::vector<float*> h_deb_score_ptrs(num_levels, nullptr);
-      std::vector<float4*> h_deb_box_ptrs(num_levels, nullptr);
-      for (int i = 0; i < num_levels; ++i) {
-        OP_REQUIRES_OK(context,
-                       context->allocate_output(
-                           i + 2, TensorShape({num_images, post_nms_topn_, 4}),
-                           &debug_outputs[i]));
-        h_deb_box_ptrs[i] = reinterpret_cast<float4*>(
-            debug_outputs[i]->template flat<float>().data());
-        OP_REQUIRES_OK(context, context->allocate_output(
-                                    i + 2 + num_levels,
-                                    TensorShape({num_images, post_nms_topn_}),
-                                    &debug_outputs[i + num_levels]));
-        h_deb_score_ptrs[i] =
-            debug_outputs[i + num_levels]->template flat<float>().data();
-        VLOG(2) << "Output level " << i << " box " << (void*)h_deb_box_ptrs[i]
-                << " scores= " << (void*)h_deb_score_ptrs[i];
+      Eigen::half nms_threshold;
+      Eigen::half min_size;
+      OP_REQUIRES_OK(context, GetScalarValue(context, 5, &nms_threshold));
+      if (Eigen::half_impl::half_to_float(nms_threshold) < 0. ||
+          Eigen::half_impl::half_to_float(nms_threshold) > 1.0) {
+        context->SetStatus(errors::InvalidArgument(
+            "nms_threshold should be between 0 and 1. Got ", nms_threshold));
+        return;
       }
-      Tensor d_deb_box_ptrs, d_deb_score_ptrs;
-      OP_REQUIRES_OK(
-          context, context->allocate_temp(DataType::DT_INT8,
-                                          TensorShape({num_images * num_levels *
-                                                       int(sizeof(float4*))}),
-                                          &d_deb_box_ptrs));
-      OP_REQUIRES_OK(
-          context, context->allocate_temp(DataType::DT_INT8,
-                                          TensorShape({num_images * num_levels *
-                                                       int(sizeof(float*))}),
-                                          &d_deb_score_ptrs));
-      void* d_dbox_ptrs =
-          reinterpret_cast<void*>(d_deb_box_ptrs.flat<int8>().data());
-      void* d_dscore_ptrs =
-          reinterpret_cast<void*>(d_deb_score_ptrs.flat<int8>().data());
-      d.memcpyHostToDevice(d_dbox_ptrs, h_deb_box_ptrs.data(),
-                           h_deb_box_ptrs.size() * sizeof(float4*));
-      d.memcpyHostToDevice(d_dscore_ptrs, h_deb_score_ptrs.data(),
-                           h_deb_score_ptrs.size() * sizeof(float*));
-      auto conf2deb = GetGpu2DLaunchConfig(num_levels, num_images, d);
-
-      OP_REQUIRES_OK(
-          context,
-          GpuLaunchKernel(
-              BatchedBoxProps::ScatterOutputs<float4>, conf2deb.block_count,
-              conf2deb.thread_per_block, 0, d.stream(),
-              reinterpret_cast<float4*>(d_selected_boxes.flat<float>().data()),
-              d_nms_io_counts, num_images, num_levels, post_nms_topn_,
-              (void*)d_dbox_ptrs));
-      OP_REQUIRES_OK(
-          context,
-          GpuLaunchKernel(
-              BatchedBoxProps::ScatterOutputs<float>, conf2deb.block_count,
-              conf2deb.thread_per_block, 0, d.stream(),
-              reinterpret_cast<float*>(SortedScores.flat<float>().data()),
-              d_nms_io_counts, num_images, num_levels, post_nms_topn_,
-              (void*)d_dscore_ptrs));
-      d.synchronize();
-    } else {
-      Tensor *dumm1, *dumm2;
-      OP_REQUIRES_OK(context,
-                     context->allocate_output(2, TensorShape({}), &dumm1));
-      OP_REQUIRES_OK(context,
-                     context->allocate_output(3, TensorShape({}), &dumm2));
+      OP_REQUIRES_OK(context, GetScalarValue(context, 7, &min_size));
+      auto status =
+          BatchedBoxProps::BatchedBoxProposalsFunctor<BatchedNMS::HalfBox,
+                                                      Eigen::half>(
+              context, scores, bbox_deltas, image_info, anchors,
+              num_entries_per_level, nms_threshold, pre_nms_topn, min_size,
+              post_nms_topn_,
+              bbox_xform_clip_default_,
+              debug_, use_legacy_offset_);
+      if (!status.ok()) context->SetStatus(status);
     }
-    size_t cub_output_tmp_size = 0;
-    // Calling cub with nullptrs as inputs will make it return
-    // workspace size needed for the operation instead of doing the operation.
-    // In this specific instance, cub_sort_storage_bytes will contain the
-    // necessary workspace size for sorting after the call.
-    cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
-        nullptr, cub_output_tmp_size,
-        static_cast<float*>(nullptr),     // selected scores
-        static_cast<float*>(nullptr),     // sorted scores
-        static_cast<float4*>(nullptr),    // selected Boxes
-        static_cast<float4*>(nullptr),    // sorted Boxes
-        d_output_indices->NumElements(),  // Total number of boxes in batch
-        num_images,  // num segments, since we are doing topK on all levels, it
-                     // is per image now
-        static_cast<int*>(nullptr), static_cast<int*>(nullptr), 0,
-        8 * sizeof(float),  // sort all bits
-        cuda_stream);
-    if (cuda_ret != cudaSuccess) {
-      context->SetStatus(errors::Internal(
-          "Topk sorting could not launch "
-          "gpuprim::DeviceSegmentedRadixSort::SortPairsDescending to sort "
-          "selected indices, "
-          "temp_storage_bytes: ",
-          cub_temp_storage_bytes, ", status: ", cudaGetErrorString(cuda_ret)));
-      return;
-    }
-
-    if (cub_output_tmp_size > cub_temp_storage_bytes) {
-      OP_REQUIRES_OK(context, context->allocate_temp(
-                                  DataType::DT_INT8,
-                                  TensorShape({(int64)cub_output_tmp_size}),
-                                  &d_cub_temp_buffer_tensor));
-      d_cub_buffer = (char*)d_cub_temp_buffer_tensor.flat<int8>().data();
-      LOG(WARNING) << "Cub buffer was insufficent. Had to reallocate. Was "
-                   << cub_temp_storage_bytes << " needed "
-                   << cub_output_tmp_size;
-      cub_temp_storage_bytes = cub_output_tmp_size;
-    }
-    // reuse decoded_boxes buffer for sorted boxes
-    float4* sorted_boxes =
-        reinterpret_cast<float4*>(d_decoded_boxes.flat<float>().data());
-    int* selected_batch_offsets = d_nms_io_counts + 3 * num_images * num_levels;
-    int* selected_batch_counts =
-        d_nms_io_counts + 3 * num_images * num_levels + 2 * num_images;
-    // sort all batches independently
-    cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
-        d_cub_buffer, cub_temp_storage_bytes,
-        SortedScores.flat<float>().data(),       // nms selected scores
-        d_selected_scores.flat<float>().data(),  // final topk scores
-        reinterpret_cast<const float4*>(
-            d_selected_boxes.flat<float>().data()),  // nms selected boxes
-        sorted_boxes,                                // final topk boxes
-        d_output_indices->NumElements(),  // Total number of boxes to sort
-        num_images,  // num segments, since we are doing topK on all levels,
-                     // it is per image now
-        selected_batch_offsets, selected_batch_offsets + num_images, 0,
-        8 * sizeof(float),  // sort all bits
-        cuda_stream);
-
-    if (cuda_ret != cudaSuccess) {
-      context->SetStatus(errors::Internal(
-          "Topk sorting could not launch "
-          "gpuprim::DeviceSegmentedRadixSort::SortPairsDescending to sort "
-          "selected indices, "
-          "temp_storage_bytes: ",
-          cub_temp_storage_bytes, ", status: ", cudaGetErrorString(cuda_ret)));
-      return;
-    }
-    //CHECK_KERNEL(context, "BBP TopkSort");
-    Tensor* output_rois = nullptr;
-    Tensor* output_roi_probs = nullptr;
-    OP_REQUIRES_OK(context, context->allocate_output(
-                                0, TensorShape({num_images, post_nms_topn_, 4}),
-                                &output_rois));
-    OP_REQUIRES_OK(context, context->allocate_output(
-                                1, TensorShape({num_images, post_nms_topn_}),
-                                &output_roi_probs));
-    float4* d_postnms_rois =
-        reinterpret_cast<float4*>((*output_rois).flat<float>().data());
-    float* d_postnms_rois_probs = (*output_roi_probs).flat<float>().data();
-    conf2d = GetGpu2DLaunchConfig(post_nms_topn_, num_images, d);
-    OP_REQUIRES_OK(
-        context,
-        GpuLaunchKernel(BatchedBoxProps::CopyTopKtoOutput, conf2d.block_count,
-                        conf2d.thread_per_block, 0, d.stream(), num_images,
-                        selected_batch_counts, selected_batch_offsets,
-                        post_nms_topn_, sorted_boxes,
-                        d_selected_scores.flat<float>().data(), d_postnms_rois,
-                        d_postnms_rois_probs));
-    //CHECK_KERNEL(context, "CopyTopKtoOutput");
   }
 
  private:

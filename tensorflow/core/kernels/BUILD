@@ -3127,10 +3127,20 @@ tf_kernel_library(
 tf_kernel_library(
     name = "generate_box_proposals_op",
     gpu_srcs = ["generate_box_proposals_op.cu.cc"],
-    #gpu_copts = ["--generate-line-info","--device-debug","--debug"],
+    gpu_copts = []+select({"//tensorflow:debug":["-nvcc_options=generate-line-info","-nvcc_options=debug"],"//conditions:default":[]}),
     deps = [":gpu_prim_hdrs"] + if_cuda([
         ":non_max_suppression_op_gpu",
     ]),
+)
+
+tf_kernel_library(
+    name = "gpu_type_helpers",
+    hdrs = [
+        "gpu_type_helpers.h",
+    ],
+    deps = [
+        "//third_party/eigen3",
+    ],
 )
 
 tf_kernel_library(
@@ -3152,12 +3162,14 @@ tf_kernel_library(
     gpu_copts = []+select({"//tensorflow:debug":["-nvcc_options=generate-line-info","-nvcc_options=debug"],"//conditions:default":[]}),
     deps = IMAGE_DEPS + ["//tensorflow/core/kernels:gpu_prim_hdrs"] + ["//tensorflow/core/kernels:transpose_functor"] + [
         "//tensorflow/core/kernels:conv_2d_gpu",
+        ":gpu_type_helpers",
     ],
 )
 
 tf_kernel_library(
     name = "non_max_suppression_op",
     prefix = "non_max_suppression_op",
+    gpu_copts = []+ select({"//tensorflow:debug":["-nvcc_options=generate-line-info","-nvcc_options=debug"],"//conditions:default":[]}),
     deps = IMAGE_DEPS + [":gpu_prim_hdrs"],
 )
 
@@ -3200,7 +3212,7 @@ tf_kernel_library(
 tf_kernel_library(
     name = "roi_align_op",
     prefix = "roi_align_op",
-    deps = IMAGE_DEPS,
+    deps = IMAGE_DEPS + [":gpu_type_helpers",],
 )
 
 tf_kernel_library(

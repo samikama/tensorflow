@@ -15,15 +15,8 @@
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 // DoTranspose is broken we need to use conv2d swapdimensions1and2intensor3
 #include "tensorflow/core/kernels/conv_2d_gpu.h"
-#define TF_RETURN_IF_CUDA_ERROR(result)                                        \
-  do {                                                                         \
-    cudaError_t error(result);                                                 \
-    if (!SE_PREDICT_TRUE(error == cudaSuccess)) {                              \
-      return errors::Internal("Cuda call failed with ",                        \
-                              cudaGetErrorString(error), " at ", __FUNCTION__, \
-                              ":", __LINE__);                                  \
-    }                                                                          \
-  } while (0)
+#include "tensorflow/core/kernels/gpu_type_helpers.h"
+#include "third_party/gpus/cuda/include/cuda_fp16.h"
 
 #define TF_OP_REQUIRES_CUDA_SUCCESS(context, result)                   \
   do {                                                                 \
@@ -35,16 +28,16 @@
     }                                                                  \
   } while (0)
 
-struct __align__(16) Box {
-  float x1, y1, x2, y2;
-};
-
 using absl::StrAppend;
 using absl::StrCat;
 
 namespace tensorflow {
 typedef Eigen::GpuDevice GPUDevice;
 typedef Eigen::ThreadPoolDevice CPUDevice;
+#define DUMP_TENSOR(T, x, y, z) \
+  BatchedNMS::dumpDeviceTensor<T>(StrCat(x, __PRETTY_FUNCTION__), y, z)
+namespace BatchedNMS {
+using namespace GpuTypeHelpers;
 
 constexpr int NumBits(int n) { return (n == 0) ? 0 : NumBits(n >> 1) + 1; }
 
@@ -57,58 +50,132 @@ __device__ EIGEN_STRONG_INLINE void Swap(T& a, T& b) {
   b = c;
 }
 
-// Check whether two boxes have an IoU greater than threshold.
 template <typename T>
-__device__ EIGEN_STRONG_INLINE bool OverThreshold(const Box* a, const Box* b,
+__device__ EIGEN_STRONG_INLINE T smin(const T& a, const T& b);
+
+template <>
+__device__ EIGEN_STRONG_INLINE float smin(const float& a, const float& b) {
+  return fminf(a, b);
+};
+
+template <>
+__device__ EIGEN_STRONG_INLINE Eigen::half smin(const Eigen::half& a,
+                                                const Eigen::half& b) {
+  return min(a, b);
+};
+
+template <typename T>
+__device__ EIGEN_STRONG_INLINE T smax(const T& a, const T& b);
+
+template <>
+__device__ EIGEN_STRONG_INLINE float smax(const float& a, const float& b) {
+  return fmaxf(a, b);
+};
+
+template <>
+__device__ EIGEN_STRONG_INLINE Eigen::half smax(const Eigen::half& a,
+                                                const Eigen::half& b) {
+  return max(a, b);
+};
+template <typename T>
+__device__ EIGEN_STRONG_INLINE T pos_diff(const T& a, const T& b);
+
+template <>
+__device__ EIGEN_STRONG_INLINE float pos_diff<float>(const float& a,
+                                                     const float& b) {
+  return fdimf(a, b);
+}
+
+template <>
+__device__ EIGEN_STRONG_INLINE Eigen::half pos_diff<Eigen::half>(
+    const Eigen::half& a, const Eigen::half& b) {
+  return max(a - b, Eigen::half(0.f));
+}
+
+// Check whether two boxes have an IoU greater than threshold.
+// TODO implement half2 version
+template <typename B, typename T>
+__device__ EIGEN_STRONG_INLINE bool OverThreshold(const B* a, const B* b,
                                                   const float a_area,
-                                                  const T iou_threshold) {
-  const float b_area = (b->x2 - b->x1) * (b->y2 - b->y1);
-  if (a_area == 0.0f || b_area == 0.0f) return false;
-  const float xx1 = fmaxf(a->x1, b->x1);
-  const float yy1 = fmaxf(a->y1, b->y1);
-  const float xx2 = fminf(a->x2, b->x2);
-  const float yy2 = fminf(a->y2, b->y2);
+                                                  const float iou_threshold) {
+  const float b_area = (asType<float>(b->x2) - asType<float>(b->x1)) * (asType<float>(b->y2) - asType<float>(b->y1));
+  if ((a_area == 0.0f) || (b_area == 0.0f)) return false;
+  const T xx1 = smax(a->x1, b->x1);
+  const T yy1 = smax(a->y1, b->y1);
+  const T xx2 = smin(a->x2, b->x2);
+  const T yy2 = smin(a->y2, b->y2);
 
   // fdimf computes the positive difference between xx2+1 and xx1.
-  const float w = fdimf(xx2, xx1);
-  const float h = fdimf(yy2, yy1);
-  const float intersection = w * h;
+  const T w = pos_diff<T>(xx2, xx1);
+  const T h = pos_diff<T>(yy2, yy1);
+  const float intersection = asType<float>(w) * asType<float>(h);
 
   // Testing for aa/bb > t
   // eq with aa > bb*t (b is !=0)
   // avoiding divisions.
   const float aa = intersection;
+  // shoudl I do this in float?
   const float bb = a_area + b_area - intersection;
   const float bt = bb * iou_threshold;
   return aa >= bt;
 }
 
-template <bool flip_box>
-__device__ EIGEN_STRONG_INLINE void Flipped(Box& box);
+template <bool flip_box, typename T>
+__device__ EIGEN_STRONG_INLINE void Flipped(T& box);
 
 template <>
-__device__ EIGEN_STRONG_INLINE void Flipped<false>(Box& box) {}
+__device__ EIGEN_STRONG_INLINE void Flipped<false, Box>(Box& box) {}
+template <>
+__device__ EIGEN_STRONG_INLINE void Flipped<false, HalfBox>(HalfBox& box) {}
 
 template <>
-__device__ EIGEN_STRONG_INLINE void Flipped<true>(Box& box) {
+__device__ EIGEN_STRONG_INLINE void Flipped<true, Box>(Box& box) {
   if (box.x1 > box.x2) Swap(box.x1, box.x2);
   if (box.y1 > box.y2) Swap(box.y1, box.y2);
 }
-template <bool clip_box>
-__device__ EIGEN_STRONG_INLINE Box Clipped(Box box);
 
 template <>
-__device__ EIGEN_STRONG_INLINE Box Clipped<false>(Box box) {
+__device__ EIGEN_STRONG_INLINE void Flipped<true, HalfBox>(HalfBox& box) {
+  if (box.x1 > box.x2) Swap(box.x1, box.x2);
+  if (box.y1 > box.y2) Swap(box.y1, box.y2);
+}
+
+template <bool clip_box, typename T>
+__device__ EIGEN_STRONG_INLINE T Clipped(T box);
+
+template <>
+__device__ EIGEN_STRONG_INLINE Box Clipped<false, Box>(Box box) {
+  return std::move(box);
+}
+template <>
+__device__ EIGEN_STRONG_INLINE HalfBox Clipped<false, HalfBox>(HalfBox box) {
   return std::move(box);
 }
 
 // This could lead to box size=0 if used incorrectly!
 template <>
-__device__ EIGEN_STRONG_INLINE Box Clipped<true>(Box box) {
-  box.x1 = fminf(fmaxf(0.0, box.x1), 1.0);
-  box.y1 = fminf(fmaxf(0.0, box.y1), 1.0);
-  box.x2 = fminf(fmaxf(0.0, box.x2), 1.0);
-  box.y2 = fminf(fmaxf(0.0, box.y2), 1.0);
+__device__ EIGEN_STRONG_INLINE Box Clipped<true, Box>(Box box) {
+  box.x1 = smin(smax(asType<decltype(box.x1)>(0.0f), box.x1),
+                asType<decltype(box.x1)>(1.0f));
+  box.y1 = smin(smax(asType<decltype(box.y1)>(0.0f), box.y1),
+                asType<decltype(box.y1)>(1.0f));
+  box.x2 = smin(smax(asType<decltype(box.x2)>(0.0f), box.x2),
+                asType<decltype(box.x2)>(1.0f));
+  box.y2 = smin(smax(asType<decltype(box.y2)>(0.0f), box.y2),
+                asType<decltype(box.y2)>(1.0f));
+  return std::move(box);
+}
+
+template <>
+__device__ EIGEN_STRONG_INLINE HalfBox Clipped<true, HalfBox>(HalfBox box) {
+  box.x1 = smin(smax(asType<decltype(box.x1)>(0.0f), box.x1),
+                asType<decltype(box.x1)>(1.0f));
+  box.y1 = smin(smax(asType<decltype(box.y1)>(0.0f), box.y1),
+                asType<decltype(box.y1)>(1.0f));
+  box.x2 = smin(smax(asType<decltype(box.x2)>(0.0f), box.x2),
+                asType<decltype(box.x2)>(1.0f));
+  box.y2 = smin(smax(asType<decltype(box.y2)>(0.0f), box.y2),
+                asType<decltype(box.y2)>(1.0f));
   return std::move(box);
 }
 
@@ -135,13 +202,14 @@ __device__ EIGEN_STRONG_INLINE void ClearBit(T* bit_mask, int bit) {
   atomicAnd(bit_mask + bin, ~(T(1) << (bit & kRemainderMask)));
 }
 
-__global__ void FlipBoxes(Box* boxes, const int* num_batch_boxes,
+template <typename T>
+__global__ void FlipBoxes(T* boxes, const int* num_batch_boxes,
                           const int* box_strides, const int batch_size) {
   for (const int y : CudaGridRangeY(batch_size)) {
     int box_offset = box_strides[y];
-    Box* curr_boxes = boxes + box_offset;
+    T* curr_boxes = boxes + box_offset;
     for (int i : GpuGridRangeX(num_batch_boxes[y])) {
-      Flipped<true>(curr_boxes[i]);
+      Flipped<true, T>(curr_boxes[i]);
     }
   }
 }
@@ -190,7 +258,8 @@ __launch_bounds__(1024) __global__
     // int start = ((box + 1) / blockDim.x) * blockDim.x;
     for (int target = threadIdx.x; target < num_boxes; target += blockDim.x) {
       if (target <= box) continue;
-      if (OverThreshold(&b, current_boxes + target, box_area, iou_threshold)) {
+      if (OverThreshold<Box, float>(&b, current_boxes + target, box_area,
+                                    iou_threshold)) {
         ClearBit<int>(selected, target);
       }
     }
@@ -213,9 +282,10 @@ __launch_bounds__(1024) __global__
 
 // This kernel uses Look-Behind algorithm for nms. More efficient when
 // max_accept/num_of_boxes is close to 0.
+template <typename B, typename T>
 __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarp(
-    const Box* boxes, const int* num_batch_boxes, const int* box_strides,
-    const int max_accept, int max_number_of_boxes, float iou_threshold,
+    const B* boxes, const int* num_batch_boxes, const int* box_strides,
+    const int max_accept, int max_number_of_boxes, T iou_threshold,
     int* selected_counts, char* selection_results) {
   // boxes, pointer to boxes.
   // num_batch_boxes, number of boxes in each batch entry.
@@ -244,13 +314,13 @@ __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarp(
       (num_boxes + kNmsReductionChunkSize - 1) / kNmsReductionChunkSize;
 
   // shared memory pointers
-  Box* const chunk = (Box*)shared_buffer;
-  float* const areas = (float*)(chunk + kNmsReductionChunkSize);
+  B* const chunk = (B*)shared_buffer;
+  float* const areas = (T*)(chunk + kNmsReductionChunkSize);
   int* const selected = (int*)(areas + kNmsReductionChunkSize);
   int* const chunk_mask = selected + bit_mask_len;
   // global memory pointer
-  const Box* current_boxes = boxes + box_stride;
-
+  const B* current_boxes = boxes + box_stride;
+  const float iou_thresholdf=asType<float>(iou_threshold);
   for (int box = threadIdx.x; box < bit_mask_len; box += blockDim.x) {
     selected[box] = 0xFFFFFFFF;
   }
@@ -265,8 +335,8 @@ __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarp(
     for (int i = threadIdx.x; i < chunk_size; i += blockDim.x) {
       SetBit(chunk_mask, i);
       chunk[i] = current_boxes[chunk_begin + i];
-      Box* b = chunk + i;
-      areas[i] = (b->y2 - b->y1) * (b->x2 - b->x1);
+      B* b = chunk + i;
+      areas[i] = asType<float>(b->y2 - b->y1) * asType<float>(b->x2 - b->x1);
     }
     __syncthreads();
     // previous chunks
@@ -288,9 +358,9 @@ __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarp(
         int const warp_offset = in_chunk * 32;
         if (active) {
           for (int in_warp = 0; in_warp < 32; ++in_warp) {
-            if (OverThreshold(chunk + warp_offset + in_warp,
-                              current_boxes + target,
-                              areas[warp_offset + in_warp], iou_threshold)) {
+            if (OverThreshold<B, T>(
+                    chunk + warp_offset + in_warp, current_boxes + target,
+                    areas[warp_offset + in_warp], iou_thresholdf)) {
               in_warp_mask ^= (1 << in_warp);
             }
           }
@@ -315,7 +385,8 @@ __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarp(
       if (active) {
         for (int j = threadIdx.x; j < i; j += blockDim.x) {
           if (CheckBit(chunk_mask, j) &&
-              OverThreshold(chunk + i, chunk + j, areas[i], iou_threshold)) {
+              OverThreshold<B, T>(chunk + i, chunk + j, areas[i],
+                                  iou_threshold)) {
             accepted = 0;
           }
         }
@@ -399,7 +470,8 @@ __launch_bounds__(1024) __global__ void NMSApplyAndReduceForwardJagged(
     // int start = ((box + 1) / blockDim.x) * blockDim.x;
     for (int target = threadIdx.x; target < num_boxes; target += blockDim.x) {
       if (target <= box) continue;
-      if (OverThreshold(&b, current_boxes + target, box_area, iou_threshold)) {
+      if (OverThreshold<Box, float>(&b, current_boxes + target, box_area,
+                                    iou_threshold)) {
         ClearBit<int>(selected, target);
       }
     }
@@ -420,11 +492,12 @@ __launch_bounds__(1024) __global__ void NMSApplyAndReduceForwardJagged(
   }
 }
 
+template <typename B, typename T>
 // This kernel uses Look-Behind algorithm for nms. More efficient when
 // max_accept/num_of_boxes is close to 0.
 __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarpJagged(
-    const Box* boxes, const int* num_batch_boxes, const int* box_strides,
-    const int max_accept, float iou_threshold, int* selected_counts,
+    const B* boxes, const int* num_batch_boxes, const int* box_strides,
+    const int max_accept, T iou_threshold, int* selected_counts,
     char* selection_results) {
   // boxes, pointer to boxes.
   // num_batch_boxes, number of boxes in each batch entry.
@@ -453,13 +526,13 @@ __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarpJagged(
       (num_boxes + kNmsReductionChunkSize - 1) / kNmsReductionChunkSize;
 
   // shared memory pointers
-  Box* const chunk = (Box*)shared_buffer;
+  B* const chunk = (B*)shared_buffer;
   float* const areas = (float*)(chunk + kNmsReductionChunkSize);
   int* const selected = (int*)(areas + kNmsReductionChunkSize);
   int* const chunk_mask = selected + bit_mask_len;
   // global memory pointer
-  const Box* current_boxes = boxes + box_stride;
-
+  const B* current_boxes = boxes + box_stride;
+  float iou_thresholdf=asType<float>(iou_threshold);
   for (int box = threadIdx.x; box < bit_mask_len; box += blockDim.x) {
     selected[box] = 0xFFFFFFFF;
   }
@@ -475,8 +548,8 @@ __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarpJagged(
     for (int i = threadIdx.x; i < chunk_size; i += blockDim.x) {
       SetBit(chunk_mask, i);
       chunk[i] = current_boxes[chunk_begin + i];
-      Box* b = chunk + i;
-      areas[i] = (b->y2 - b->y1) * (b->x2 - b->x1);
+      B* b = chunk + i;
+      areas[i] = (asType<float>(b->y2) - asType<float>(b->y1)) * (asType<float>(b->x2) - asType<float>(b->x1));
     }
     __syncthreads();
     // previous chunks
@@ -501,9 +574,9 @@ __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarpJagged(
         if (active) {
           // loop over 32 boxes in the chunk compare it with target
           for (int in_warp = 0; in_warp < 32; ++in_warp) {
-            if (OverThreshold(chunk + warp_offset + in_warp,
-                              current_boxes + target,
-                              areas[warp_offset + in_warp], iou_threshold)) {
+            if (OverThreshold<B, T>(
+                    chunk + warp_offset + in_warp, current_boxes + target,
+                    areas[warp_offset + in_warp], iou_thresholdf)) {
               in_warp_mask ^= (1 << in_warp);
             }
           }
@@ -534,7 +607,8 @@ __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarpJagged(
       if (active) {
         for (int j = threadIdx.x; j < i; j += blockDim.x) {
           if (CheckBit(chunk_mask, j) &&
-              OverThreshold(chunk + i, chunk + j, areas[i], iou_threshold)) {
+              OverThreshold<B, T>(chunk + i, chunk + j, areas[i],
+                                  iou_thresholdf)) {
             accepted = 0;
           }
         }
@@ -575,11 +649,12 @@ __launch_bounds__(1024) __global__ void NMSApplyAndReduceChunkedInWarpJagged(
   }
 }
 
+template <typename T>
 __global__ void BroadcastBoxes(const int num_boxes, const int num_classes,
-                               const int batch_size, const Box* input_boxes,
-                               Box* output_boxes) {
+                               const int batch_size, const T* input_boxes,
+                               T* output_boxes) {
   constexpr int cache_size = 2048;
-  __shared__ Box BoxCache[cache_size];
+  __shared__ T BoxCache[cache_size];
   int num_chunks = (num_boxes + cache_size - 1) / cache_size;
   int batch_offset =
       blockIdx.y * num_boxes;  // input boxes are given only once per batch
@@ -605,6 +680,7 @@ __global__ void BroadcastBoxes(const int num_boxes, const int num_classes,
   }
 }
 
+template <typename T>
 // Batch version of IndexMultiSelect, num_elemets contains number of elements in
 // each entry offsets is the offsets of batch entries,
 __global__ void TransposedBoxSelect(
@@ -615,16 +691,16 @@ __global__ void TransposedBoxSelect(
     const int num_boxes,         // NB
     const int max_output_boxes,  // Max num selected (NS)
     const int* input_indices,    // [B,NC,NB]
-    const Box* original,         // [B,NB,NbC]
-    Box* selected                // [B,NC,NS]
+    const T* original,           // [B,NB,NbC]
+    T* selected                  // [B,NC,NS]
 ) {
   for (const int batch : GpuGridRangeZ(batch_size)) {
     // CombinedNMS can compress input boxes by specifying each box once
     // regardless of class count
-    const Box* batch_boxes = original + batch * num_boxes * num_box_classes;
+    const T* batch_boxes = original + batch * num_boxes * num_box_classes;
     for (const int y : GpuGridRangeY(num_classes)) {
-      Box* output_boxes = selected + batch * num_classes * max_output_boxes +
-                          y * max_output_boxes;
+      T* output_boxes = selected + batch * num_classes * max_output_boxes +
+                        y * max_output_boxes;
       const int* class_indices =
           input_indices + batch * num_classes * num_boxes + y * num_boxes;
       for (const int idx :
@@ -664,6 +740,7 @@ __global__ void IotaJagged(const int* device_counts,
     }
   }
 }
+
 __global__ void BatchIndexScatter(const int* batch_counts, const int* offsets,
                                   int batch_size, const int* input_indices,
                                   int* output_indices) {
@@ -678,9 +755,10 @@ __global__ void BatchIndexScatter(const int* batch_counts, const int* offsets,
   }
 }
 
+template <typename T>
 __launch_bounds__(1024) __global__
-    void FindPartitionIndex(const float* sorted_scores, const int* num_boxes,
-                            const int max_boxes, const float threshold,
+    void FindPartitionIndex(const T* sorted_scores, const int* num_boxes,
+                            const int max_boxes, const T threshold,
                             int* partitions) {
   // do this block by block it shouldn't matter much
   size_t offset = 0;
@@ -690,7 +768,7 @@ __launch_bounds__(1024) __global__
     return;
   }
   for (int i = 0; i < blockIdx.x; ++i) offset += max_boxes;
-  const float* scores = sorted_scores + offset;
+  const T* scores = sorted_scores + offset;
   __syncthreads();
   for (int i = threadIdx.x; i < n_boxes - 1; i += blockDim.x) {
     if (scores[i] > threshold) {
@@ -709,10 +787,10 @@ __launch_bounds__(1024) __global__
   }
 }
 
+template <typename T>
 __launch_bounds__(1024) __global__
-    void FindPartitionIndexJagged(const float* sorted_scores,
-                                  const int* num_boxes, const float threshold,
-                                  int* partitions) {
+    void FindPartitionIndexJagged(const T* sorted_scores, const int* num_boxes,
+                                  const T threshold, int* partitions) {
   // do this block by block it shouldn't matter much
   size_t offset = 0;
   int n_boxes = num_boxes[blockIdx.x];
@@ -721,7 +799,7 @@ __launch_bounds__(1024) __global__
     return;
   }
   for (int i = 0; i < blockIdx.x; ++i) offset += num_boxes[i];
-  const float* scores = sorted_scores + offset;
+  const T* scores = sorted_scores + offset;
   __syncthreads();
   for (int i = threadIdx.x; i < n_boxes - 1; i += blockDim.x) {
     if (scores[i] > threshold) {
@@ -740,13 +818,13 @@ __launch_bounds__(1024) __global__
   }
 }
 
-template <bool clipped>
+template <bool clipped, typename B, typename T>
 __global__ void CombineClasses(
     const int* indices,  // Selected box indices per batch per class from
                          // DoNMSBatchedGPU [batch,num_classes,per_class_stride]
     const int per_class_stride,  // output per_class stride from DoNMSBatchedGPU
-    const Box* boxes,  // transposed boxes, [batch_size*numclasses,num_boxes,4]
-    const float* scores,  //  transposed scores [batch,num_classes,num_boxes]
+    const B* boxes,   // transposed boxes, [batch_size*numclasses,num_boxes,4]
+    const T* scores,  //  transposed scores [batch,num_classes,num_boxes]
     const int* num_selections,  // number of selected boxes in each class from
                                 // [batch*num_classes] DoNMSBatchedGPU
     const int num_boxes,        // number of input boxes
@@ -754,28 +832,25 @@ __global__ void CombineClasses(
     const int num_classes,      // number of classes per batch
     bool pad_per_class,         // whether final ouput is padded per class
     int max_output,             // maximum output for final tensors
-    Box* out_boxes,             // output boxes concatenated
-    float* out_scores,          // output_scores
-    float* out_classes,         // output classes
+    B* out_boxes,               // output boxes concatenated
+    T* out_scores,              // output_scores
+    T* out_classes,             // output classes
     int* merged_counts,         // output_counts and start offsets for sorting
     int* final_counts,          // counts for final ouput tensors
     int* out_sort_indices) {    // indices for sorting
-
   for (int b : CudaGridRangeZ(num_batches)) {
-    const Box* input_boxes = boxes + (b * num_classes) * num_boxes;
+    const B* input_boxes = boxes + (b * num_classes) * num_boxes;
     const int* batch_indices = indices + (b * (per_class_stride * num_classes));
-    const float* batch_in_scores = scores + (b * num_boxes * num_classes);
+    const T* batch_in_scores = scores + (b * num_boxes * num_classes);
     Box* batch_out_boxes = out_boxes + (b * (per_class_stride * num_classes));
-    float* batch_out_scores =
-        out_scores + (b * (per_class_stride * num_classes));
-    float* batch_out_classes =
-        out_classes + (b * (per_class_stride * num_classes));
+    T* batch_out_scores = out_scores + (b * (per_class_stride * num_classes));
+    T* batch_out_classes = out_classes + (b * (per_class_stride * num_classes));
     int* batch_out_sort_indices =
         out_sort_indices + (b * (per_class_stride * num_classes));
     for (int c : CudaGridRangeY(num_classes)) {
-      const Box* class_boxes = input_boxes + (c * num_boxes);
+      const B* class_boxes = input_boxes + (c * num_boxes);
       const int* class_indices = batch_indices + (c * per_class_stride);
-      const float* class_scores = batch_in_scores + c * num_boxes;
+      const T* class_scores = batch_in_scores + c * num_boxes;
       int out_offset = 0;
       for (int i = b * num_classes; i < (b * num_classes + c); ++i) {
         out_offset += num_selections[i];
@@ -783,7 +858,7 @@ __global__ void CombineClasses(
       for (int idx : CudaGridRangeX(num_selections[b * num_classes + c])) {
         int input_index = class_indices[idx];
         batch_out_boxes[out_offset + idx] =
-            Clipped<clipped>(class_boxes[input_index]);
+            Clipped<clipped, B>(class_boxes[input_index]);
         batch_out_scores[out_offset + idx] = class_scores[input_index];
         batch_out_classes[out_offset + idx] = c;
         batch_out_sort_indices[out_offset + idx] = out_offset + idx;
@@ -808,6 +883,7 @@ __global__ void CombineClasses(
     }
   }
 }
+}  // namespace BatchedNMS
 
 Status DoNMSBatchedGPU(OpKernelContext* context, const Tensor& boxes,
                        const Tensor& scores, const Tensor& box_counts_tensor,
@@ -929,7 +1005,7 @@ Status DoNMSBatchedGPU(OpKernelContext* context, const Tensor& boxes,
   // initialize box and score indices
   auto config2d = GetGpu2DLaunchConfig(max_boxes, batch_size, device);
   TF_RETURN_IF_ERROR(GpuLaunchKernel(
-      Iota<int>, config2d.block_count, config2d.thread_per_block, 0,
+      BatchedNMS::Iota<int>, config2d.block_count, config2d.thread_per_block, 0,
       device.stream(), max_boxes, 0, d_indices.flat<int>().data(), batch_size));
   Tensor device_box_counts_tensor;
   TF_RETURN_IF_ERROR(context->allocate_temp(DataType::DT_INT32,
@@ -971,16 +1047,16 @@ Status DoNMSBatchedGPU(OpKernelContext* context, const Tensor& boxes,
     device.memcpyHostToDevice(device_box_counts, box_counts,
                               sizeof(int) * batch_size);
     TF_RETURN_IF_ERROR(GpuLaunchKernel(
-        FindPartitionIndex, batch_size, 1024, 0, device.stream(),
-        d_sorted_scores.flat<float>().data(), device_box_counts, max_boxes,
-        score_threshold, device_box_counts));
+        BatchedNMS::FindPartitionIndex<float>, batch_size, 1024, 0,
+        device.stream(), d_sorted_scores.flat<float>().data(),
+        device_box_counts, max_boxes, score_threshold, device_box_counts));
   } else {
     device.memcpyHostToDevice(device_box_counts, box_counts,
                               sizeof(int) * batch_size);
   }
   if (!pre_sorted_inputs) {
     TF_RETURN_IF_ERROR(GpuLaunchKernel(
-        BNMS::BatchedIndexMultiSelect<int, float4>, config2d.block_count,
+        BatchedNMS::BatchedIndexMultiSelect<int, float4>, config2d.block_count,
         config2d.thread_per_block, 0, device.stream(), device_box_counts,
         device_begin_offsets, device_begin_offsets, batch_size,
         d_sorted_indices.flat<int>().data(),
@@ -988,16 +1064,16 @@ Status DoNMSBatchedGPU(OpKernelContext* context, const Tensor& boxes,
         reinterpret_cast<float4*>(d_sorted_boxes.flat<float>().data())));
   }
   config2d = GetGpu2DLaunchConfig(max_boxes, batch_size, device);
-  Box* sorted_boxes =
-      reinterpret_cast<Box*>(d_sorted_boxes.flat<float>().data());
+  BatchedNMS::Box* sorted_boxes =
+      reinterpret_cast<BatchedNMS::Box*>(d_sorted_boxes.flat<float>().data());
   char* selection_mask =
       reinterpret_cast<char*>(d_selection_mask.flat<int8>().data());
   // Make sure that the boxes are flipped to ensure x1<x2 and y1<y2
 
   TF_RETURN_IF_ERROR(GpuLaunchKernel(
-      FlipBoxes, config2d.block_count, config2d.thread_per_block, 0,
-      device.stream(), sorted_boxes, device_box_counts, device_begin_offsets,
-      batch_size));
+      BatchedNMS::FlipBoxes<BatchedNMS::Box>, config2d.block_count,
+      config2d.thread_per_block, 0, device.stream(), sorted_boxes,
+      device_box_counts, device_begin_offsets, batch_size));
   int bitmask_length_bytes =
       ((max_boxes + sizeof(int) * 8 - 1) / (sizeof(int) * 8)) * sizeof(int);
   // simple heuristics for auto selecting which kernel to use
@@ -1015,20 +1091,21 @@ Status DoNMSBatchedGPU(OpKernelContext* context, const Tensor& boxes,
   }
   if (kernel == 1) {  // use Look-Forward kernel
     TF_RETURN_IF_ERROR(GpuLaunchKernel(
-        NMSApplyAndReduceForward, batch_size, 1024, bitmask_length_bytes,
-        device.stream(), sorted_boxes, device_box_counts, device_begin_offsets,
-        max_output_size, max_boxes, iou_threshold_val, num_saved_outputs,
-        selection_mask));
+        BatchedNMS::NMSApplyAndReduceForward, batch_size, 1024,
+        bitmask_length_bytes, device.stream(), sorted_boxes, device_box_counts,
+        device_begin_offsets, max_output_size, max_boxes, iou_threshold_val,
+        num_saved_outputs, selection_mask));
   } else if (kernel == 0) {  // Use Look-Backward kernel
-    int shm_size = bitmask_length_bytes +
-                   (sizeof(float) * 5) * kNmsReductionChunkSize +
-                   (kNmsReductionChunkSize + sizeof(int) * 8 - 1) / 8;
+    int shm_size =
+        bitmask_length_bytes +
+        (sizeof(float) * 5) * BatchedNMS::kNmsReductionChunkSize +
+        (BatchedNMS::kNmsReductionChunkSize + sizeof(int) * 8 - 1) / 8;
     shm_size += 8;
     TF_RETURN_IF_ERROR(GpuLaunchKernel(
-        NMSApplyAndReduceChunkedInWarp, batch_size, 1024, shm_size,
-        device.stream(), sorted_boxes, device_box_counts, device_begin_offsets,
-        max_output_size, max_boxes, iou_threshold_val, num_saved_outputs,
-        selection_mask));
+        BatchedNMS::NMSApplyAndReduceChunkedInWarp<BatchedNMS::Box, float>,
+        batch_size, 1024, shm_size, device.stream(), sorted_boxes,
+        device_box_counts, device_begin_offsets, max_output_size, max_boxes,
+        iou_threshold_val, num_saved_outputs, selection_mask));
   }
   // CheckKernel(context, "After NMS");
   // There is no guarantee that boxes are given in the for x1<x2 and/or y1<y2,
@@ -1082,9 +1159,9 @@ Status DoNMSBatchedGPU(OpKernelContext* context, const Tensor& boxes,
 
   config2d = GetGpu2DLaunchConfig(max_boxes, batch_size, device);
   TF_RETURN_IF_ERROR(GpuLaunchKernel(
-      BatchIndexScatter, config2d.block_count, config2d.thread_per_block, 0,
-      device.stream(), num_saved_outputs, device_begin_offsets, batch_size,
-      device_selected_indices,
+      BatchedNMS::BatchIndexScatter, config2d.block_count,
+      config2d.thread_per_block, 0, device.stream(), num_saved_outputs,
+      device_begin_offsets, batch_size, device_selected_indices,
       device_selected_indices + (max_boxes * batch_size)));
   for (int i = 0; i < batch_size; ++i) {
     begin_end_offsets[i] = i * num_outputs;
@@ -1094,7 +1171,7 @@ Status DoNMSBatchedGPU(OpKernelContext* context, const Tensor& boxes,
 
   TF_RETURN_IF_ERROR(
       // input and output offsets are different!
-      GpuLaunchKernel(BNMS::BatchedIndexMultiSelect<int, int>,
+      GpuLaunchKernel(BatchedNMS::BatchedIndexMultiSelect<int, int>,
                       config2d.block_count, config2d.thread_per_block, 0,
                       device.stream(), num_saved_outputs, device_begin_offsets,
                       device_begin_offsets + batch_size, batch_size,
@@ -1105,12 +1182,13 @@ Status DoNMSBatchedGPU(OpKernelContext* context, const Tensor& boxes,
   return Status::OK();
 }
 
-Status DoNMSBatchedGPUJagged(
+template <typename B, typename T>
+Status DoNMSBatchedGPUJaggedFunctor(
     OpKernelContext* context, const Tensor& boxes, const Tensor& scores,
     const Tensor& box_counts_tensor, const int max_output_size,
-    const float iou_threshold_val, const float score_threshold,
-    bool pad_to_max_output, int* num_saved_outputs, Tensor** output_indices,
-    int kernel, bool pre_sorted_inputs) {
+    const T iou_threshold_val, const T score_threshold, bool pad_to_max_output,
+    int* num_saved_outputs, Tensor** output_indices, int kernel,
+    bool pre_sorted_inputs) {
   int batch_size = box_counts_tensor.dim_size(0);
   auto cuda_stream = GetGpuStream(context);
   auto device = context->eigen_gpu_device();
@@ -1122,8 +1200,9 @@ Status DoNMSBatchedGPUJagged(
   alloc_attr.set_gpu_compatible(true);
   Tensor begin_end_offsets_host_tensor;
   TF_RETURN_IF_ERROR(
-      context->allocate_temp(DataType::DT_INT32, TensorShape({3 * batch_size}),
+      context->allocate_temp(DataType::DT_INT32, TensorShape({5 * batch_size}),
                              &begin_end_offsets_host_tensor, alloc_attr));
+
   int* begin_end_offsets = begin_end_offsets_host_tensor.flat<int>().data();
   // LOG(INFO) << BNMS::dumpDeviceTensor<int>("Input box_counts",
   // box_counts_tensor,
@@ -1139,6 +1218,11 @@ Status DoNMSBatchedGPUJagged(
     begin_offset += box_counts[i];
     begin_end_offsets[2 * batch_size + i] =
         begin_end_offsets[i + batch_size] + box_counts[i];
+    begin_end_offsets[3 * batch_size + i] =
+        max_output_size *
+        i;  // output offsets in case of pad_to_max_output=true
+    begin_end_offsets[4 * batch_size + i] =
+        0;  // output offsets to be filled by nms op if pad_to_max_output=False
   }
   if (max_boxes == 0) {
     TF_RETURN_IF_ERROR(context->allocate_temp(
@@ -1159,6 +1243,7 @@ Status DoNMSBatchedGPUJagged(
 
   size_t cub_temp_storage_bytes = 0;
   cudaError_t cuda_ret = cudaSuccess;
+
   if (!pre_sorted_inputs) {
     // Calling cub with nullptrs as inputs will make it return
     // workspace size needed for the operation instead of doing the operation.
@@ -1166,14 +1251,16 @@ Status DoNMSBatchedGPUJagged(
     // necessary workspace size for sorting after the call.
     cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
         nullptr, cub_temp_storage_bytes,
-        static_cast<float*>(nullptr),  // scores
-        static_cast<float*>(nullptr),  // sorted scores
-        static_cast<int*>(nullptr),    // input indices
-        static_cast<int*>(nullptr),    // sorted indices
-        total_boxes,                   // Total number of boxes in batch
-        batch_size,                    // num segments
+        static_cast<const typename BatchedNMS::ToCubType<T>::Type*>(
+            nullptr),  // scores
+        static_cast<typename BatchedNMS::ToCubType<T>::Type*>(
+            nullptr),                // sorted scores
+        static_cast<int*>(nullptr),  // input indices
+        static_cast<int*>(nullptr),  // sorted indices
+        total_boxes,                 // Total number of boxes in batch
+        batch_size,                  // num segments
         static_cast<int*>(nullptr), static_cast<int*>(nullptr), 0,
-        8 * sizeof(float),  // sort all bits
+        8 * sizeof(typename BatchedNMS::ToCubType<T>::Type),  // sort all bits
         cuda_stream);
     TF_RETURN_IF_CUDA_ERROR(cuda_ret);
     TF_RETURN_IF_CUDA_ERROR(cudaGetLastError());
@@ -1214,9 +1301,9 @@ Status DoNMSBatchedGPUJagged(
     TF_RETURN_IF_ERROR(context->allocate_temp(
         DataType::DT_INT32, TensorShape({total_boxes}), &d_sorted_indices));
     TF_RETURN_IF_ERROR(context->allocate_temp(
-        DataType::DT_FLOAT, TensorShape({total_boxes}), &d_sorted_scores));
+        boxes.dtype(), TensorShape({total_boxes}), &d_sorted_scores));
     TF_RETURN_IF_ERROR(context->allocate_temp(
-        DataType::DT_FLOAT, TensorShape({total_boxes, 4}), &d_sorted_boxes));
+        boxes.dtype(), TensorShape({total_boxes, 4}), &d_sorted_boxes));
   } else {
     d_sorted_indices = d_indices;
     d_sorted_scores = scores;
@@ -1252,9 +1339,9 @@ Status DoNMSBatchedGPUJagged(
   // "<<config2d.thread_per_block.z<<")";
 
   TF_RETURN_IF_ERROR(GpuLaunchKernel(
-      IotaJagged<int>, config2d.block_count, config2d.thread_per_block, 0,
-      device.stream(), device_box_counts, device_begin_offsets, 0,
-      d_indices.flat<int>().data(), batch_size));
+      BatchedNMS::IotaJagged<int>, config2d.block_count,
+      config2d.thread_per_block, 0, device.stream(), device_box_counts,
+      device_begin_offsets, 0, d_indices.flat<int>().data(), batch_size));
   // LOG(INFO) << BNMS::dumpDeviceTensor<int>("IotaJagged device_begin_offsets",
   //                                    device_begin_end_offsets_tensor,
   //                                    context);
@@ -1263,14 +1350,16 @@ Status DoNMSBatchedGPUJagged(
     // sort the inputs by scores
     cuda_ret = gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
         d_cub_temp_buffer.flat<int8>().data(), cub_temp_storage_bytes,
-        scores.flat<float>().data(),           // scores
-        d_sorted_scores.flat<float>().data(),  // sorted scores
-        d_indices.flat<int>().data(),          // input indices
-        d_sorted_indices.flat<int>().data(),   // sorted indices
-        total_boxes,                           // Total number of boxes in batch
-        batch_size,                            // num segments
+        reinterpret_cast<const typename BatchedNMS::ToCubType<T>::Type*>(
+            scores.flat<T>().data()),  // scores
+        reinterpret_cast<typename BatchedNMS::ToCubType<T>::Type*>(
+            d_sorted_scores.flat<T>().data()),  // sorted scores
+        d_indices.flat<int>().data(),           // input indices
+        d_sorted_indices.flat<int>().data(),    // sorted indices
+        total_boxes,  // Total number of boxes in batch
+        batch_size,   // num segments
         device_begin_offsets, device_begin_offsets + batch_size, 0,
-        8 * sizeof(float),  // sort all bits
+        8 * sizeof(typename BatchedNMS::ToCubType<T>::Type),  // sort all bits
         cuda_stream);
     if (cuda_ret != cudaSuccess) {
       return errors::Internal(
@@ -1281,32 +1370,29 @@ Status DoNMSBatchedGPUJagged(
     }
   }
   // CheckKernel(context,"CUBSort BatchedNMS");
-  if (score_threshold > std::numeric_limits<float>::lowest()) {
+  if (score_threshold > std::numeric_limits<T>::lowest()) {
     // copy the box counts to the device
     // device.memcpyHostToDevice(device_box_counts, box_counts,
     //                           sizeof(int) * batch_size);
     // // find the index of the box that is below the threshold
     // and put it in device_box_counts
-    TF_RETURN_IF_ERROR(
-        GpuLaunchKernel(FindPartitionIndexJagged, batch_size, 1024, 0,
-                        device.stream(), d_sorted_scores.flat<float>().data(),
-                        device_box_counts, score_threshold, device_box_counts));
+    TF_RETURN_IF_ERROR(GpuLaunchKernel(
+        BatchedNMS::FindPartitionIndexJagged<T>, batch_size, 1024, 0,
+        device.stream(), d_sorted_scores.flat<T>().data(), device_box_counts,
+        score_threshold, device_box_counts));
     // } else {
     //   device.memcpyHostToDevice(device_box_counts, box_counts,
     //                             sizeof(int) * batch_size);
   }
-  // LOG(INFO) << BNMS::dumpDeviceTensor<int>("AfterFindPartition device
-  // counts",
-  //                                    device_box_counts_tensor, context);
-  // LOG(INFO) << BNMS::dumpDeviceTensor<int>("AfterFindPartition device
-  // offsets",
-  //                                    device_begin_end_offsets_tensor,
-  //                                    context);
+  if (VLOG_IS_ON(2)) {
+    LOG(INFO) << DUMP_TENSOR(int, "AfterFindPartition device offsets",
+                             device_begin_end_offsets_tensor, context);
+  }
   if (!pre_sorted_inputs) {
     // select the first elements from boxes and scores where box score is above
-    // thresholf
+    // threshold
     TF_RETURN_IF_ERROR(GpuLaunchKernel(
-        BNMS::BatchedIndexMultiSelect<int, Box>, config2d.block_count,
+        BatchedNMS::BatchedIndexMultiSelect<int, B>, config2d.block_count,
         config2d.thread_per_block, 0, device.stream(),
         /*num_elements=*/device_box_counts,
         /*input_strides=*/device_begin_offsets,
@@ -1314,17 +1400,16 @@ Status DoNMSBatchedGPUJagged(
         /*batch_size=*/batch_size,
         /*indices=*/d_sorted_indices.flat<int>().data(),
         /*original=*/
-        reinterpret_cast<const Box*>(boxes.flat<float>().data()),
+        reinterpret_cast<const B*>(boxes.flat<T>().data()),
         /*selected=*/
-        reinterpret_cast<Box*>(d_sorted_boxes.flat<float>().data())));
+        reinterpret_cast<B*>(d_sorted_boxes.flat<T>().data())));
   }
-  // LOG(INFO) << BNMS::dumpDeviceTensor<int>("After sorting BIMS device
-  // offsets",
-  //                                    device_begin_end_offsets_tensor,
-  //                                    context);
+  if (VLOG_IS_ON(2)) {
+    LOG(INFO) << DUMP_TENSOR(int, "After sorting BIMS device offsets",
+                             device_begin_end_offsets_tensor, context);
+  }
   config2d = GetGpu2DLaunchConfig(max_boxes, batch_size, device);
-  Box* sorted_boxes =
-      reinterpret_cast<Box*>(d_sorted_boxes.flat<float>().data());
+  B* sorted_boxes = reinterpret_cast<B*>(d_sorted_boxes.flat<T>().data());
   char* selection_mask =
       reinterpret_cast<char*>(d_selection_mask.flat<int8>().data());
   // Make sure that the boxes are flipped to ensure x1<x2 and y1<y2
@@ -1332,8 +1417,8 @@ Status DoNMSBatchedGPUJagged(
   // flip the boxes if they are not formatted in (x1,y1,x2,y2) where x1<x2 and
   // y1<y2
   TF_RETURN_IF_ERROR(GpuLaunchKernel(
-      FlipBoxes, config2d.block_count, config2d.thread_per_block, 0,
-      device.stream(), sorted_boxes, device_box_counts, device_begin_offsets,
+      BatchedNMS::FlipBoxes<B>, config2d.block_count, config2d.thread_per_block,
+      0, device.stream(), sorted_boxes, device_box_counts, device_begin_offsets,
       batch_size));
   // CheckKernel(context, "FlipBoxes");
   int bitmask_length_bytes =
@@ -1353,23 +1438,24 @@ Status DoNMSBatchedGPUJagged(
     }
   }
   // Apply nms and put the selected box counts to num_saved_outputs.
-  if (kernel == 1) {  // use Look-Forward kernel
-    TF_RETURN_IF_ERROR(GpuLaunchKernel(
-        NMSApplyAndReduceForwardJagged, batch_size, 1024, bitmask_length_bytes,
-        device.stream(), sorted_boxes, device_box_counts, device_begin_offsets,
-        max_output_size, iou_threshold_val, num_saved_outputs, selection_mask));
-  } else if (kernel == 0) {  // Use Look-Backward kernel
-    int shm_size = bitmask_length_bytes +
-                   (sizeof(float) * 5) * kNmsReductionChunkSize +
-                   (kNmsReductionChunkSize + sizeof(int) * 8 - 1) / 8;
-    shm_size += 8;
-    TF_RETURN_IF_ERROR(GpuLaunchKernel(
-        NMSApplyAndReduceChunkedInWarpJagged, batch_size, 1024, shm_size,
-        device.stream(), sorted_boxes, device_box_counts, device_begin_offsets,
-        max_output_size, iou_threshold_val, num_saved_outputs, selection_mask));
+  int shm_size = bitmask_length_bytes +
+                 (sizeof(float) * 5) * BatchedNMS::kNmsReductionChunkSize +
+                 (BatchedNMS::kNmsReductionChunkSize + sizeof(int) * 8 - 1) / 8;
+  shm_size += 8;
+  TF_RETURN_IF_ERROR(
+      GpuLaunchKernel(BatchedNMS::NMSApplyAndReduceChunkedInWarpJagged<B, T>,
+                      batch_size, 1024, shm_size, device.stream(), sorted_boxes,
+                      device_box_counts, device_begin_offsets, max_output_size,
+                      iou_threshold_val, num_saved_outputs, selection_mask));
+  if (VLOG_IS_ON(2)) {
+    LOG(INFO) << BatchedNMS::dumpDeviceTensor<int>(
+        StrCat("Num elements after NMS ", __PRETTY_FUNCTION__),
+        num_saved_outputs, batch_size, context);
   }
-  // LOG(INFO) << BNMS::dumpDeviceTensor<int>("Num elements after nms",
-  //                                    num_saved_outputs, batch_size, context);
+  if (VLOG_IS_ON(5)) {
+    LOG(INFO) << BatchedNMS::dumpDeviceTensor<int8>("Selection mask after NMS",
+                                                    d_selection_mask, context);
+  }
   // There is no guarantee that boxes are given in the for x1<x2 and/or y1<y2,
   Tensor selected_counts_host_tensor;
   TF_RETURN_IF_ERROR(
@@ -1436,18 +1522,32 @@ Status DoNMSBatchedGPUJagged(
   // we want them to be in each batches respective start in case of padded
   // outputs after that each selected entry list will start at
   // device_begin_offsets[b] for each batch b
+  if (VLOG_IS_ON(4)) {
+    LOG(INFO) << BatchedNMS::dumpDeviceTensor<int>("Dumping Selected Indices",
+                                                   d_selected_indices, context,
+                                                   total_selected);
+  }
+
+  if (VLOG_IS_ON(2)) {
+    LOG(INFO) << BatchedNMS::dumpDeviceTensor<int>(
+        "Dumping Selected counts after cub flagged",
+        device_selected_counts_tensor, context, 1);
+  }
   TF_RETURN_IF_ERROR(GpuLaunchKernel(
-      BatchIndexScatter, config2d.block_count, config2d.thread_per_block, 0,
-      device.stream(), num_saved_outputs, device_begin_offsets, batch_size,
-      device_selected_indices, device_selected_indices + total_boxes));
+      BatchedNMS::BatchIndexScatter, config2d.block_count,
+      config2d.thread_per_block, 0, device.stream(), num_saved_outputs,
+      device_begin_offsets, batch_size, device_selected_indices,
+      device_selected_indices + total_boxes));
+  if (VLOG_IS_ON(3)) {
+    LOG(INFO) << BatchedNMS::dumpDeviceTensor<int>(
+        "Dumping Scattered Indices", device_selected_indices + total_boxes,
+        total_boxes, context, total_selected);
+  }
 
   // reuse device_begin_end_offsets+batchsize for offsets in the output tensor
   // if padded it is every num_outputs step
-  if (pad_to_max_output) {
-    for (int i = 0; i < batch_size; ++i) {
-      begin_end_offsets[i] = i * num_outputs;
-    }
-  } else {
+  if (!pad_to_max_output) {
+    // input and output offsets are different!
     // if output is not padded, then the ouput offsets are number of selected
     // boxes
     int selected_offset = 0;
@@ -1455,23 +1555,67 @@ Status DoNMSBatchedGPUJagged(
       begin_end_offsets[i] = selected_offset;
       selected_offset += selected_counts[i];
     }
+    device.memcpyHostToDevice(device_begin_offsets + batch_size,
+                              begin_end_offsets, sizeof(int) * batch_size * 3);
+    // this shouldn't be necessary but somehow memcpyAsync on the
+    // device.stream() is executing after BatchedIndexMultiSelect
+    device.synchronize();
   }
-  device.memcpyHostToDevice(device_begin_offsets + batch_size,
-                            begin_end_offsets, sizeof(int) * batch_size);
+  if (VLOG_IS_ON(1)) {
+    std::stringstream oss;
+    oss << context->op_kernel().name() << " Offsets at host ";
+    for (int i = 0; i < batch_size - 1; ++i) {
+      oss << begin_end_offsets[i] << ", ";
+    }
+    oss << begin_end_offsets[batch_size - 1] << std::endl;
+    LOG(INFO) << oss.str();
+  }
   // output_indices will contain selected indices of each batch concatenated
   // num_saved_outputs will contain number of entries in each selected batch
   // element
-  TF_RETURN_IF_ERROR(
-      // input and output offsets are different!
-      GpuLaunchKernel(BNMS::BatchedIndexMultiSelect<int, int>,
-                      config2d.block_count, config2d.thread_per_block, 0,
-                      device.stream(), num_saved_outputs, device_begin_offsets,
-                      device_begin_offsets + batch_size, batch_size,
-                      device_selected_indices + total_boxes,
-                      d_sorted_indices.flat<int>().data(),
-                      (*output_indices)->flat<int>().data()));
+  TF_RETURN_IF_ERROR(GpuLaunchKernel(
+      BatchedNMS::BatchedIndexMultiSelect<int, int>, config2d.block_count,
+      config2d.thread_per_block, 0, device.stream(), num_saved_outputs,
+      device_begin_offsets, device_begin_offsets + 2 * batch_size, batch_size,
+      device_selected_indices + total_boxes,
+      d_sorted_indices.flat<int>().data(),
+      (*output_indices)->flat<int>().data()));
+
+  if (VLOG_IS_ON(3)) {
+    LOG(INFO) << BatchedNMS::dumpDeviceTensor<int>(
+        "Begin End offsets before multi-select ",
+        device_begin_end_offsets_tensor, context);
+  }
+  if (VLOG_IS_ON(3)) {
+    LOG(INFO) << BatchedNMS::dumpDeviceTensor<int>(
+        "Dumping Scattered Indices ", **output_indices, context, total_selected);
+  }
 
   return Status::OK();
+}
+
+Status DoNMSBatchedGPUJagged(
+    OpKernelContext* context, const Tensor& boxes, const Tensor& scores,
+    const Tensor& box_counts_tensor, const int max_output_size,
+    const float iou_threshold_val, const float score_threshold,
+    bool pad_to_max_output, int* num_saved_outputs, Tensor** output_indices,
+    int kernel, bool pre_sorted_inputs) {
+  return DoNMSBatchedGPUJaggedFunctor<BatchedNMS::Box, float>(
+      context, boxes, scores, box_counts_tensor, max_output_size,
+      iou_threshold_val, score_threshold, pad_to_max_output, num_saved_outputs,
+      output_indices, kernel, pre_sorted_inputs);
+}
+
+Status DoNMSBatchedGPUJagged(
+    OpKernelContext* context, const Tensor& boxes, const Tensor& scores,
+    const Tensor& box_counts_tensor, const int max_output_size,
+    const Eigen::half iou_threshold_val, const Eigen::half score_threshold,
+    bool pad_to_max_output, int* num_saved_outputs, Tensor** output_indices,
+    int kernel, bool pre_sorted_inputs) {
+  return DoNMSBatchedGPUJaggedFunctor<BatchedNMS::HalfBox, Eigen::half>(
+      context, boxes, scores, box_counts_tensor, max_output_size,
+      iou_threshold_val, score_threshold, pad_to_max_output, num_saved_outputs,
+      output_indices, kernel, pre_sorted_inputs);
 }
 
 Status CheckValidInputs(const Tensor& boxes, const Tensor& scores,
@@ -1586,7 +1730,7 @@ Status SortScores(OpKernelContext* context, int batch_size, int num_classes,
       GetGpu2DLaunchConfig(num_boxes, batch_size * num_classes, device);
 
   TF_RETURN_IF_ERROR(GpuLaunchKernel(
-      Iota<int>, config2d.block_count, config2d.thread_per_block, 0,
+      BatchedNMS::Iota<int>, config2d.block_count, config2d.thread_per_block, 0,
       device.stream(), num_boxes, 0, indices->template flat<int>().data(),
       batch_size * num_classes));
 
@@ -1683,9 +1827,10 @@ Status SortScoresJagged(
       GetGpu2DLaunchConfig(max_boxes, batch_size * num_classes, device);
 
   TF_RETURN_IF_ERROR(GpuLaunchKernel(
-      IotaJagged<int>, config2d.block_count, config2d.thread_per_block, 0,
-      device.stream(), num_boxes, device_begin_offsets, 0,
-      indices->template flat<int>().data(), batch_size * num_classes));
+      BatchedNMS::IotaJagged<int>, config2d.block_count,
+      config2d.thread_per_block, 0, device.stream(), num_boxes,
+      device_begin_offsets, 0, indices->template flat<int>().data(),
+      batch_size * num_classes));
 
   TF_RETURN_IF_CUDA_ERROR(
       gpuprim::DeviceSegmentedRadixSort::SortPairsDescending(
@@ -1895,8 +2040,9 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
       int* device_offsets = device_offsets_tensor.flat<int>().data();
       OP_REQUIRES_OK(
           context,
-          GpuLaunchKernel(FindPartitionIndex, batch_size * num_classes, 1024, 0,
-                          device.stream(), sorted_scores.flat<float>().data(),
+          GpuLaunchKernel(BatchedNMS::FindPartitionIndex<float>,
+                          batch_size * num_classes, 1024, 0, device.stream(),
+                          sorted_scores.flat<float>().data(),
                           device_offsets + 2 * batch_size * num_classes,
                           num_boxes, score_threshold_val,
                           device_selected_counts_tensor.flat<int>().data()));
@@ -1943,7 +2089,7 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
           sizeof(int) * score_counts_tensor.NumElements());
       OP_REQUIRES_OK(
           context, GpuLaunchKernel(
-                       BNMS::BatchedIndexMultiSelect<int, float>,
+                       BatchedNMS::BatchedIndexMultiSelect<int, float>,
                        config2d.block_count, config2d.thread_per_block, 0,
                        device.stream(), device_selected_counts, device_offsets,
                        device_offsets + 2 * batch_size * num_classes,
@@ -1951,49 +2097,51 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
                        sorted_scores.flat<float>().data(),
                        sliced_scores.flat<float>().data()));
       sorted_scores = sliced_scores;
-      auto config3d =
-          GetGpu3DLaunchConfig(max_boxes, num_classes, batch_size, device,
-                               TransposedBoxSelect, 0, 1024);
-      const Box* in_boxes =
-          reinterpret_cast<const Box*>(boxes.flat<float>().data());
-      Box* out_boxes =
-          reinterpret_cast<Box*>(reshaped_boxes_tensor.flat<float>().data());
+      auto config3d = GetGpu3DLaunchConfig(
+          max_boxes, num_classes, batch_size, device,
+          BatchedNMS::TransposedBoxSelect<BatchedNMS::Box>, 0, 1024);
+      const BatchedNMS::Box* in_boxes =
+          reinterpret_cast<const BatchedNMS::Box*>(boxes.flat<float>().data());
+      BatchedNMS::Box* out_boxes = reinterpret_cast<BatchedNMS::Box*>(
+          reshaped_boxes_tensor.flat<float>().data());
 
       OP_REQUIRES_OK(
           context,
           GpuLaunchKernel(
-              TransposedBoxSelect, config3d.block_count,
-              config3d.thread_per_block, 0, device.stream(),
-              device_selected_counts_tensor.flat<int>().data(), batch_size,
-              num_classes, (int)boxes.dim_size(2), num_boxes, max_boxes,
-              sorted_indices.flat<int>().data(), in_boxes, out_boxes));
+              BatchedNMS::TransposedBoxSelect<BatchedNMS::Box>,
+              config3d.block_count, config3d.thread_per_block, 0,
+              device.stream(), device_selected_counts_tensor.flat<int>().data(),
+              batch_size, num_classes, (int)boxes.dim_size(2), num_boxes,
+              max_boxes, sorted_indices.flat<int>().data(), in_boxes,
+              out_boxes));
     } else {
-      auto config3d =
-          GetGpu3DLaunchConfig(num_boxes, num_classes, batch_size, device,
-                               TransposedBoxSelect, 0, 1024);
+      auto config3d = GetGpu3DLaunchConfig(
+          num_boxes, num_classes, batch_size, device,
+          BatchedNMS::TransposedBoxSelect<BatchedNMS::Box>, 0, 1024);
       OP_REQUIRES_OK(context,
                      context->allocate_temp(
                          DataType::DT_FLOAT,
                          TensorShape({batch_size * num_classes, num_boxes, 4}),
                          &reshaped_boxes_tensor));
 
-      const Box* in_boxes =
-          reinterpret_cast<const Box*>(boxes.flat<float>().data());
+      const BatchedNMS::Box* in_boxes =
+          reinterpret_cast<const BatchedNMS::Box*>(boxes.flat<float>().data());
 
-      Box* out_boxes =
-          reinterpret_cast<Box*>(reshaped_boxes_tensor.flat<float>().data());
+      BatchedNMS::Box* out_boxes = reinterpret_cast<BatchedNMS::Box*>(
+          reshaped_boxes_tensor.flat<float>().data());
 
       max_boxes = num_boxes;
       int* device_selected_counts = device_offsets_tensor.flat<int>().data() +
                                     batch_size * num_classes * 2;
 
       OP_REQUIRES_OK(
-          context, GpuLaunchKernel(
-                       TransposedBoxSelect, config3d.block_count,
-                       config3d.thread_per_block, 0, device.stream(),
-                       device_selected_counts, batch_size, num_classes,
-                       (int)boxes.dim_size(2), num_boxes, num_boxes,
-                       sorted_indices.flat<int>().data(), in_boxes, out_boxes));
+          context,
+          GpuLaunchKernel(BatchedNMS::TransposedBoxSelect<BatchedNMS::Box>,
+                          config3d.block_count, config3d.thread_per_block, 0,
+                          device.stream(), device_selected_counts, batch_size,
+                          num_classes, (int)boxes.dim_size(2), num_boxes,
+                          num_boxes, sorted_indices.flat<int>().data(),
+                          in_boxes, out_boxes));
     }
     Tensor output_indices_tensor;
     Tensor* output_indices_ptr = &output_indices_tensor;
@@ -2048,11 +2196,11 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
                                                    &final_counts_tensor));
 
     int* post_nms_indices = output_indices_tensor.flat<int>().data();
-    Box* reshaped_boxes =
-        reinterpret_cast<Box*>(reshaped_boxes_tensor.flat<float>().data());
+    BatchedNMS::Box* reshaped_boxes = reinterpret_cast<BatchedNMS::Box*>(
+        reshaped_boxes_tensor.flat<float>().data());
     float* reshaped_scores = sorted_scores.flat<float>().data();
-    Box* out_boxes =
-        reinterpret_cast<Box*>(gathered_boxes_tensor.flat<float>().data());
+    BatchedNMS::Box* out_boxes = reinterpret_cast<BatchedNMS::Box*>(
+        gathered_boxes_tensor.flat<float>().data());
     float* out_classes = gathered_classes_tensor.flat<float>().data();
     float* out_scores = gathered_scores_tensor.flat<float>().data();
     int* merged_counts = merged_box_counts_tensor.flat<int>().data();
@@ -2060,33 +2208,35 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
     int* final_counts = final_counts_tensor.flat<int>().data();
 
     if (clip_boxes_) {
-      Gpu3DLaunchConfig config3d =
-          GetGpu3DLaunchConfig(max_size_per_class, num_classes, batch_size,
-                               device, CombineClasses<true>, 0, 1024);
+      Gpu3DLaunchConfig config3d = GetGpu3DLaunchConfig(
+          max_size_per_class, num_classes, batch_size, device,
+          BatchedNMS::CombineClasses<true, BatchedNMS::Box, float>, 0, 1024);
 
       OP_REQUIRES_OK(
           context,
           GpuLaunchKernel(
-              CombineClasses<true>, config3d.block_count,
-              config3d.thread_per_block, 0, device.stream(), post_nms_indices,
-              max_size_per_class, reshaped_boxes, reshaped_scores,
-              per_class_outputs, max_boxes, batch_size, num_classes,
-              pad_per_class_, max_total_size_per_batch, out_boxes, out_scores,
-              out_classes, merged_counts, final_counts, out_sort_indices));
+              BatchedNMS::CombineClasses<true, BatchedNMS::Box, float>,
+              config3d.block_count, config3d.thread_per_block, 0,
+              device.stream(), post_nms_indices, max_size_per_class,
+              reshaped_boxes, reshaped_scores, per_class_outputs, max_boxes,
+              batch_size, num_classes, pad_per_class_, max_total_size_per_batch,
+              out_boxes, out_scores, out_classes, merged_counts, final_counts,
+              out_sort_indices));
     } else {
-      Gpu3DLaunchConfig config3d =
-          GetGpu3DLaunchConfig(max_size_per_class, num_classes, batch_size,
-                               device, CombineClasses<false>, 0, 1024);
+      Gpu3DLaunchConfig config3d = GetGpu3DLaunchConfig(
+          max_size_per_class, num_classes, batch_size, device,
+          BatchedNMS::CombineClasses<false, BatchedNMS::Box, float>, 0, 1024);
 
       OP_REQUIRES_OK(
           context,
           GpuLaunchKernel(
-              CombineClasses<false>, config3d.block_count,
-              config3d.thread_per_block, 0, device.stream(), post_nms_indices,
-              max_size_per_class, reshaped_boxes, reshaped_scores,
-              per_class_outputs, max_boxes, batch_size, num_classes,
-              pad_per_class_, max_total_size_per_batch, out_boxes, out_scores,
-              out_classes, merged_counts, final_counts, out_sort_indices));
+              BatchedNMS::CombineClasses<false, BatchedNMS::Box, float>,
+              config3d.block_count, config3d.thread_per_block, 0,
+              device.stream(), post_nms_indices, max_size_per_class,
+              reshaped_boxes, reshaped_scores, per_class_outputs, max_boxes,
+              batch_size, num_classes, pad_per_class_, max_total_size_per_batch,
+              out_boxes, out_scores, out_classes, merged_counts, final_counts,
+              out_sort_indices));
     }
 
     Tensor post_nms_sorted_scores, post_nms_sorted_indices,
@@ -2110,8 +2260,8 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
                                 2, TensorShape({batch_size, total_output}),
                                 &output_classes_tensor));
     context->set_output(3, final_counts_tensor);
-    Box* final_boxes =
-        reinterpret_cast<Box*>(output_boxes_tensor->flat<float>().data());
+    BatchedNMS::Box* final_boxes = reinterpret_cast<BatchedNMS::Box*>(
+        output_boxes_tensor->flat<float>().data());
     float* final_classes = output_classes_tensor->flat<float>().data();
     float* final_scores = output_scores_tensor->flat<float>().data();
     auto zero_config = GetGpuLaunchConfig(batch_size * total_output, device);
@@ -2144,13 +2294,13 @@ class CombinedNonMaxSuppressionGPUOp : public OpKernel {
 
     OP_REQUIRES_OK(
         context,
-        GpuLaunchKernel(BNMS::BatchedIndexMultiSelect<int, Box, float*, float*,
-                                                      float*, float*>,
-                        config2d.block_count, config2d.thread_per_block, 0,
-                        device.stream(), final_counts, merged_counts,
-                        per_class_outputs, batch_size, psorted_indices,
-                        out_boxes, final_boxes, out_scores, final_scores,
-                        out_classes, final_classes));
+        GpuLaunchKernel(
+            BatchedNMS::BatchedIndexMultiSelect<int, BatchedNMS::Box, float*,
+                                                float*, float*, float*>,
+            config2d.block_count, config2d.thread_per_block, 0, device.stream(),
+            final_counts, merged_counts, per_class_outputs, batch_size,
+            psorted_indices, out_boxes, final_boxes, out_scores, final_scores,
+            out_classes, final_classes));
   }
 
  private:

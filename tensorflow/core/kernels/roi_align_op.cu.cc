@@ -34,6 +34,7 @@ limitations under the License.
 #include "tensorflow/core/util/tensor_format.h"
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "third_party/gpus/cuda/include/cuda.h"
+#include "tensorflow/core/kernels/gpu_type_helpers.h"
 //#include "tensorflow/core/kernels/gpu_prim.h"
 
 #define CUDA_CHECK(result)                                    \
@@ -46,54 +47,54 @@ namespace tensorflow {
 
 typedef Eigen::GpuDevice GPUDevice;
 namespace {
-
-template <typename T>
-EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE float asFloat(T);
-template <>
-EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE float asFloat<float>(float f) {
-  return f;
-}
-template <>
-EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE float asFloat<Eigen::half>(
-    Eigen::half f) {
-  return __half2float(f);
-}
-template <typename T, typename U>
-EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE T asType(U);
-template <>
-EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE float asType<float, Eigen::half>(
-    Eigen::half f) {
-  return __half2float(f);
-}
-template <>
-EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE Eigen::half asType<Eigen::half, float>(
-    float f) {
-  return __float2half(f);
-}
-template <>
-EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE float asType<float, float>(float f) {
-  return f;
-}
-template <>
-EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE Eigen::half
-asType<Eigen::half, Eigen::half>(Eigen::half f) {
-  return f;
-}
-template <>
-EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE float asType<float, int>(int f) {
-  return static_cast<float>(f);
-}
-template <>
-EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE Eigen::half asType<Eigen::half, int>(
-    int f) {
-  return __float2half(static_cast<float>(f));
-}
-// template<> EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE int
-// asType<int,Eigen::half>(Eigen::half f){return __half2int_rd(f);}
-template <>
-EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE int asType<int, float>(float f) {
-  return static_cast<int>(f);
-}
+using namespace GpuTypeHelpers;
+// template <typename T>
+// EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE float asFloat(T);
+// template <>
+// EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE float asFloat<float>(float f) {
+//   return f;
+// }
+// template <>
+// EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE float asFloat<Eigen::half>(
+//     Eigen::half f) {
+//   return __half2float(f);
+// }
+// template <typename T, typename U>
+// EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE T asType(U);
+// template <>
+// EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE float asType<float, Eigen::half>(
+//     Eigen::half f) {
+//   return __half2float(f);
+// }
+// template <>
+// EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE Eigen::half asType<Eigen::half, float>(
+//     float f) {
+//   return __float2half(f);
+// }
+// template <>
+// EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE float asType<float, float>(float f) {
+//   return f;
+// }
+// template <>
+// EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE Eigen::half
+// asType<Eigen::half, Eigen::half>(Eigen::half f) {
+//   return f;
+// }
+// template <>
+// EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE float asType<float, int>(int f) {
+//   return static_cast<float>(f);
+// }
+// template <>
+// EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE Eigen::half asType<Eigen::half, int>(
+//     int f) {
+//   return __float2half(static_cast<float>(f));
+// }
+// // template<> EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE int
+// // asType<int,Eigen::half>(Eigen::half f){return __half2int_rd(f);}
+// template <>
+// EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE int asType<int, float>(float f) {
+//   return static_cast<int>(f);
+// }
 
 template <typename T>
 EIGEN_DEVICE_FUNC EIGEN_ALWAYS_INLINE T bilinear_interpolate_hwc(

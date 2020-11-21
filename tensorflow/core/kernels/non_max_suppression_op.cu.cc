@@ -263,7 +263,7 @@ __launch_bounds__(kNmsBlockDim* kNmsBlockDim, 4) __global__
         Box j_box = d_desc_sorted_boxes[j];
         const Box i_box = shared_i_boxes[threadIdx.x];
         Flipped<flip_box>(j_box);
-        if (OverThreshold<float>(&i_box, &j_box, shared_i_areas[threadIdx.x],
+        if (NMSGPU::OverThreshold<float>(&i_box, &j_box, shared_i_areas[threadIdx.x],
                                  iou_threshold)) {
           // we have score[j] <= score[i].
           above_threshold |= (1U << ib);
